@@ -578,18 +578,23 @@ header, body, footer — is worded as "you should buy this".
   `resolveTokenMetadata` and cached in `index.ts` (all-zero address → the
   native `ETH` sentinel; unresolved → the literal label `quote units`,
   never a bare number). Carried on `AlertContext.quoteTokenSymbol`, used by
-  both templates; sub-1.0 amounts now show 6 fraction digits. (3) Latent
-  bug found + fixed in the sell-totals path: `trades.wallet` was written
-  from viem's EIP-55-checksummed `tx.from` while `getSellTotalsByWallets`
-  matched lowercased watchlist addresses — it would have returned zero
-  sells in production. `recordTrade` now lowercases `wallet` on write (the
-  convention `wallet_watchlist` and `listByTokenAndWallets`'s own
-  doc-comment already assumed), and `getSellTotalsByWallets` matches on
-  `lower(trades.wallet)` so it's also correct for rows already stored
-  checksummed. **Follow-up:** a one-time `UPDATE trades SET wallet =
-  lower(wallet);` would additionally fix `hasWalletSold` (deployer-sold
-  risk) and Phase 5's `listByTokenAndWallets` aggregates for the ~7k
-  historical rows; new rows need no backfill.
+  both templates; sub-1.0 amounts now show 6 fraction digits. (3)
+  Address-casing hardening in the sell-totals path — **defensive, not an
+  active-bug fix**: I initially expected `trades.wallet` to be EIP-55
+  checksummed (viem's usual behaviour for address fields), which would
+  have broken the lowercased-watchlist match in `getSellTotalsByWallets`.
+  Checking the real dev DB disproved that — on this chain/RPC/viem stack
+  `getTransactionSender`'s `tx.from` comes back **lowercase**, so all
+  7,346 historical `trades.wallet` values (and every `tokens.deployer`,
+  also from `tx.from`) were already lowercase; `tokens.address` and other
+  event-arg-decoded addresses are still checksummed. `hasWalletSold` was
+  therefore always matching historical data correctly. The changes kept
+  anyway as cheap guards: `recordTrade` lowercases `wallet` on write (the
+  convention `wallet_watchlist` and `listByTokenAndWallets`'s doc-comment
+  already state), and `getSellTotalsByWallets` matches on
+  `lower(trades.wallet)` + keys its result lowercased. A `UPDATE trades
+  SET wallet = lower(wallet)` was run on the dev DB to confirm — **0 rows
+  affected**.
 - **Real send test (2026-09-05).** With a real bot token + chat id in
   `.env` (gitignored), three mock signals covering all three bands —
   NORMAL (7.4), STRONG (8.5), and URGENT (9.3) with `riskLevel: UNKNOWN` /

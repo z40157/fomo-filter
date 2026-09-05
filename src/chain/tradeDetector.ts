@@ -309,10 +309,11 @@ export function createTradeDetector(deps: TradeDetectorDeps): TradeDetector {
         deps.httpClient.getTransactionSender(params.transactionHash),
         deps.httpClient.getBlockTimestamp(params.blockNumber),
       ]);
-      // viem returns tx.from EIP-55 checksummed; store lowercased so every
-      // downstream wallet filter (watchlist matching, per-wallet sell totals,
-      // deployer-sold check) compares against a single canonical form — same
-      // convention wallet_watchlist already uses.
+      // `tx.from` already comes back lowercase from this chain's RPC, but
+      // lowercase it explicitly anyway so every downstream wallet filter
+      // (watchlist matching, per-wallet sell totals, deployer-sold check)
+      // has a guaranteed single canonical form regardless of RPC/viem
+      // quirks — same convention wallet_watchlist already uses.
       const wallet = rawWallet.toLowerCase();
 
       const trade: NewTrade = {

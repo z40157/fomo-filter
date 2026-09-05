@@ -182,11 +182,11 @@ export function createTradesRepo(db: Database): TradesRepo {
 
     async getSellTotalsByWallets(tokenId, wallets, before) {
       if (wallets.length === 0) return new Map();
-      // Match case-insensitively and key the result lowercased: `trades.wallet`
-      // is written from viem's `tx.from`, which is EIP-55 checksummed, while
-      // callers pass lowercased watchlist addresses. (recordTrade also
-      // lowercases on write now, so this only matters for rows recorded
-      // before that fix — but it's the safe thing to do regardless.)
+      // Match case-insensitively and key the result lowercased. `trades.wallet`
+      // is in practice already lowercase (this chain's RPC returns tx.from
+      // lowercase, and recordTrade lowercases on write regardless), and
+      // callers pass lowercased watchlist addresses — the lower() here is a
+      // cheap guard against a future RPC/viem change, not a live-bug fix.
       const lowered = wallets.map((w) => w.toLowerCase());
       const rows = await db
         .select({ wallet: trades.wallet, quoteAmount: trades.quoteAmount })
