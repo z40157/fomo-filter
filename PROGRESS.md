@@ -6,19 +6,20 @@ and their BUY/SELL trading activity as a data source for a future
 FOMO-detection/alerting system. This file exists so a new session (or a
 human) can get oriented without re-deriving everything from the code.
 
-## Status: Phase 3 complete (2026-09-05)
+## Status: Phase 4 complete (2026-09-05)
 
 - ✅ Phase 0 — Skeleton
 - ✅ Phase 1 — Chain watcher (WS + reconnect + restart recovery)
 - ✅ Phase 2 — New-token discovery (Doppler + Pons V1)
 - ✅ Phase 3 — BUY/SELL trade detection (Doppler + Pons V1)
-- ⬜ Phase 4 — Wallet watchlist (not started)
-- ⬜ Everything else — `walletWatchlist`, `tokenSnapshots`, `signals`,
-  `signalWallets`, `alerts`, `signalOutcomes`, `narrativeFlags` tables are
-  still placeholder-only (just `id`/`createdAt`).
+- ✅ Phase 4 — Wallet watchlist (manually curated, admin API + import + trade-time matching)
+- ⬜ Phase 5 — DexScreener integration (not started; explicitly deferred by the project owner)
+- ⬜ Everything else — `tokenSnapshots`, `signals`, `signalWallets`, `alerts`,
+  `signalOutcomes`, `narrativeFlags` tables are still placeholder-only (just
+  `id`/`createdAt`).
 
-Tests: 31/31 passing (`npm test`). Typecheck clean (`npm run typecheck` and
-`npm run typecheck:test`).
+Tests: 54/54 passing (`npm test`). Typecheck clean (`npm run typecheck` and
+`npm run typecheck:test`). `npm run build` clean.
 
 ---
 
@@ -71,6 +72,52 @@ Tests: 31/31 passing (`npm test`). Typecheck clean (`npm run typecheck` and
   filtered to the Swap event selector, so Transfer logs never reach the
   detector at all — there's no explicit "ignore Transfer" branch to get
   wrong.
+
+### Phase 4 — Wallet watchlist (`src/db/walletWatchlist.ts`, `src/watchlist/`, `src/wallets/`, `src/api/routes/wallets.ts`)
+V1 is entirely manually curated — no auto-classification of who's a KOL.
+This phase only stores, dedups, and compares against a human-maintained
+list at trade-recording time.
+
+- `wallet_watchlist` table: `address` (PK, always lowercased before
+  writing — an `0xABC…`/`0xabc…` case difference must never create a
+  second row), `name`, `type` (`KOL`/`FOMO_TRADER`/`SMART_MONEY` enum),
+  `tier` (`A`/`B`/`C` enum), `owner_group` (free-text — groups multiple
+  addresses controlled by the same real person, see decision #6 below),
+  `enabled` (default `true`, so an address can be paused without
+  deleting its history), `notes`, `created_at`/`updated_at`.
+- Admin API (`src/api/routes/wallets.ts`): `GET/POST/PATCH/DELETE
+  /api/wallets`. Write routes are guarded by `src/api/adminAuth.ts`
+  (constant-time compare of the `x-admin-key` header against
+  `ADMIN_API_KEY`; an unset `ADMIN_API_KEY` locks writes down rather than
+  leaving them open). `GET` is intentionally unauthenticated — watchlist
+  membership isn't sensitive for this internal read-only tool, and
+  something needs to list it for a future dashboard. Request bodies are
+  validated with zod (`src/wallets/validation.ts`, shared with the import
+  script below); invalid input is a 400 with a field-level message,
+  duplicate addresses on `POST` are a 409.
+- Bulk import: `data/wallets.json` (gitignored — real curated addresses
+  are operational data, not something to commit, same reasoning as
+  `.env`) plus a tracked `data/wallets.example.json` template. `npm run
+  wallets:import` (`src/scripts/importWallets.ts`) reads the file and
+  upserts every entry by lowercased address via the same core logic
+  (`src/wallets/importWallets.ts`) that's unit-tested against a fake
+  repo — invalid rows are skipped and reported, not fatal to the batch.
+- Trade-time matching: `src/watchlist/watchlistCache.ts` keeps an
+  in-memory `Map<address, WalletEntry>` of currently-enabled wallets so
+  every recorded trade can be checked with zero extra DB round-trips.
+  `tradeDetector.ts`'s `recordTrade` looks up the trade's wallet after a
+  successful (non-duplicate) insert and logs a `"watchlist wallet trade"`
+  info line with `name`/`tier`/`ownerGroup`/`token`/`side`/amounts on a
+  hit. The cache is refreshed immediately after every API write, and
+  also on a 60s timer in `index.ts` — the timer exists specifically to
+  pick up `wallets:import` runs (a separate process the live server has
+  no other way to hear about).
+- `countDistinctOwnerGroups` (`watchlistCache.ts`) is written and tested
+  now, used by nothing yet — it's what Phase 5's resonance/co-buy
+  detection will need to avoid counting one person's 5 wallets as 5
+  independent KOLs.
+- `GET /health` gains `watchedWallets` (`watchlistCache.size()` — no DB
+  query).
 
 ---
 
@@ -169,6 +216,31 @@ call (was 5, for the old free-tier plan). Chunking itself is still always
 applied — never a single unbounded range — both for the RPC's hard cap and
 because of point 4 above.
 
+### 6. `ownerGroup`, not address, is the unit that will ever get counted
+The watchlist's whole reason for existing beyond a simple address list is
+`ownerGroup`: a real person can (and does) run several wallets, and any
+future "N KOLs bought within M minutes" resonance logic (Phase 5+) must
+count distinct **owners**, not distinct **addresses** — otherwise one
+person self-trading across 5 wallets looks identical to 5 independent
+KOLs agreeing, which would be a false signal. `ownerGroup` is a free-text
+string (not its own table/FK) deliberately — V1 has no auto-clustering of
+wallets into owners, a human decides via the `notes`/`ownerGroup` fields
+when adding entries. `countDistinctOwnerGroups` in `watchlistCache.ts` is
+the one place this grouping is actually consumed (so far, by nothing —
+it's there for Phase 5).
+
+### 7. The watchlist cache has two refresh triggers, not one, on purpose
+Refreshing only on API writes (the obvious choice) misses a case that
+actually happens on this project: `npm run wallets:import` runs as a
+**separate process** from the live server (see `src/scripts/
+importWallets.ts`), so a bulk import while the server is already running
+would otherwise go unnoticed until restart. `index.ts` therefore also
+refreshes the cache on a 60s timer (`.unref()`'d so it doesn't keep the
+process alive), on top of the immediate refresh after every `POST`/
+`PATCH`/`DELETE`. If a wallet is added via import while the server is up,
+expect up to ~60s of lag before its trades start producing hit logs —
+this is a known, accepted trade-off, not a bug.
+
 ---
 
 ## Confirmed contract addresses (chainId 4663) and their source
@@ -199,6 +271,19 @@ amount exactly).
 ---
 
 ## Known limitations / follow-ups
+
+- **`drizzle-kit generate` prompts interactively** (not a `--yes`-able flag)
+  whenever a table's shape changes enough that it can't tell a dropped+added
+  column apart from a rename — this happened converting `wallet_watchlist`
+  from its `id`/`createdAt` placeholder to real columns (one prompt per new
+  column, asking "create column" vs "rename from `id`"). Always "create
+  column" was correct here. It also generated `DROP COLUMN "id"` positioned
+  *after* `ADD COLUMN "address" ... PRIMARY KEY`, which fails at migrate
+  time ("multiple primary keys") since the old PK on `id` is still there —
+  had to hand-edit the generated SQL to move the `DROP COLUMN "id"` line
+  first. Check the generated SQL by eye before running `drizzle-kit
+  migrate` any time a placeholder table gets its real columns for the
+  first time.
 
 - **`usd_value` is always `null` for now** — no pricing pass exists yet.
   This was explicit in the Phase 3 spec ("save raw quote amount, don't
@@ -240,12 +325,24 @@ amount exactly).
   still only reports watcher/DB/token-count status, nothing trades-related
   yet.
 - Real verification data (165 real Doppler tokens, 7,337+ real trades, 9
-  real Pons trades on BUNEE) is sitting in whatever Postgres instance
-  `DATABASE_URL` in `.env` points to (a local Docker container named
-  `alpha-radar-pg` in the dev environment this was verified in) — this is
-  real production-shaped data, not fixtures, left in place as evidence and
-  because Phase 4 (wallet watchlist) will likely want to build on it.
+  real Pons trades on BUNEE, 3 real watchlist wallets) is sitting in
+  whatever Postgres instance `DATABASE_URL` in `.env` points to (a local
+  Docker container named `alpha-radar-pg` in the dev environment this was
+  verified in) — this is real production-shaped data, not fixtures, left
+  in place as evidence and because later phases will likely build on it.
+- **The watchlist has no notion of "who added this or when, beyond
+  `created_at`/`updated_at`"** — no audit log of admin API calls. Fine for
+  V1's single-operator manual curation; would need revisiting if multiple
+  people administer the list.
+- **`data/wallets.json` is real local operational data and is
+  gitignored** — same treatment as `.env`. Only `data/wallets.example.json`
+  is tracked. Anyone picking up this repo fresh needs to create their own
+  `data/wallets.json` (or use the admin API) before `wallets:import` has
+  anything to do.
 
 ## Next planned phase
-Phase 4 — Wallet watchlist (not yet started as of 2026-09-05; requirements
-to be provided by the project owner).
+Phase 5 — DexScreener integration (not yet started as of 2026-09-05;
+requirements to be provided by the project owner). The project owner has
+also flagged that Phase 5's resonance/co-buy detection will consume
+`countDistinctOwnerGroups` from `src/watchlist/watchlistCache.ts`, already
+written and tested in Phase 4.
