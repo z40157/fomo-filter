@@ -350,6 +350,7 @@ export function createTradeDetector(deps: TradeDetectorDeps): TradeDetector {
               tokenId: params.token.id,
               tokenAddress: params.token.address,
               tokenSymbol: params.token.symbol,
+              tokenName: params.token.name,
               tokenPairToken: params.token.pairToken,
               tokenDeployer: params.token.deployer,
               tokenLaunchTime: params.token.launchTime,

@@ -97,6 +97,9 @@ function fakeTradesRepo(): TradesRepo & { rows: NewTrade[] } {
     async getLargestSellUsdSince() {
       return null;
     },
+    async getSellTotalsByWallets() {
+      return new Map();
+    },
   };
 }
 
@@ -106,6 +109,7 @@ function dopplerToken(overrides: Partial<TrackedToken> = {}): TrackedToken {
     address: DOPPLER_ASSET,
     deployer: "0x1234567890123456789012345678901234567890",
     symbol: "TEST",
+    name: "Test Token",
     launchSource: "doppler",
     pairToken: NATIVE,
     pool: DOPPLER_ASSET,
@@ -123,6 +127,7 @@ function ponsToken(overrides: Partial<TrackedToken> = {}): TrackedToken {
     address: PONS_ASSET,
     deployer: "0x1234567890123456789012345678901234567890",
     symbol: "PONS",
+    name: "Pons Token",
     launchSource: "pons_v1",
     pairToken: PONS_PAIR,
     pool: PONS_POOL,

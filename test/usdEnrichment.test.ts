@@ -24,6 +24,7 @@ function fakeTradesRepo(pending: PendingUsdValueTrade[]): TradesRepo & { updates
     countTotalBuysSells: async () => ({ buys: 0, sells: 0 }),
     hasWalletSold: async () => false,
     getLargestSellUsdSince: async () => null,
+    getSellTotalsByWallets: async () => new Map(),
   };
 }
 

@@ -198,10 +198,38 @@ export const signalWallets = pgTable("signal_wallets", {
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 });
 
-export const alerts = pgTable("alerts", {
-  id: serial("id").primaryKey(),
-  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-});
+export const alertChannelEnum = pgEnum("alert_channel", ["email", "telegram"]);
+export const deliveryStatusEnum = pgEnum("delivery_status", ["sent", "failed"]);
+
+// One row per delivery attempt (not per signal) — a signal that fires both
+// an email and a Telegram message gets two rows. Dedup/cooldown decisions
+// (alerts/alertLogic.ts) are made per (tokenId, channel) by reading the
+// most recent "sent" row here, joined back to `signals` for the
+// ownerGroup/Tier-A counts at that time.
+export const alerts = pgTable(
+  "alerts",
+  {
+    id: serial("id").primaryKey(),
+    signalId: integer("signal_id")
+      .notNull()
+      .references(() => signals.id),
+    tokenId: integer("token_id")
+      .notNull()
+      .references(() => tokens.id),
+    channel: alertChannelEnum("channel").notNull(),
+    sentAt: timestamp("sent_at", { withTimezone: true }).notNull(),
+    importanceAtSend: numeric("importance_at_send", { precision: 4, scale: 2 }).notNull(),
+    riskAtSend: riskLevelEnum("risk_at_send"),
+    confidenceAtSend: confidenceLevelEnum("confidence_at_send"),
+    // Which dedup/cooldown rule allowed this send — see alerts/alertLogic.ts's
+    // AlertTriggerReason for the fixed set of values.
+    triggerReason: varchar("trigger_reason", { length: 32 }).notNull(),
+    deliveryStatus: deliveryStatusEnum("delivery_status").notNull(),
+    errorMessage: text("error_message"),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [index("alerts_token_id_channel_sent_at_idx").on(table.tokenId, table.channel, table.sentAt)],
+);
 
 export const signalOutcomes = pgTable("signal_outcomes", {
   id: serial("id").primaryKey(),

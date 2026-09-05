@@ -11,6 +11,7 @@ import { createWalletWatchlistRepo } from "./db/walletWatchlist.js";
 import { createTokenSnapshotsRepo } from "./db/tokenSnapshots.js";
 import { createSignalsRepo } from "./db/signals.js";
 import { createNarrativeFlagsRepo } from "./db/narrativeFlags.js";
+import { createAlertsRepo } from "./db/alerts.js";
 import { createWatchlistCache } from "./watchlist/watchlistCache.js";
 import { CHAIN_ID, createHttpClient, createWsClient } from "./chain/client.js";
 import { ChainWatcher } from "./chain/watcher.js";
@@ -22,6 +23,9 @@ import type { TrackerConfig } from "./market/candidateTrackerLogic.js";
 import { createErc20DecimalsResolver, createUsdEnrichmentJob } from "./market/usdEnrichment.js";
 import { createResonanceDetector } from "./signals/resonanceDetector.js";
 import type { ResonanceConfig } from "./signals/resonanceLogic.js";
+import { createAlertDispatcher } from "./alerts/alertDispatcher.js";
+import { createResendClient } from "./alerts/resendClient.js";
+import { createTelegramClient } from "./alerts/telegramClient.js";
 
 const WATCHLIST_REFRESH_INTERVAL_MS = 60_000;
 const USD_ENRICHMENT_INTERVAL_MS = 30_000;
@@ -86,10 +90,44 @@ async function main(): Promise<void> {
   const snapshotsRepo = createTokenSnapshotsRepo(db);
   const signalsRepo = createSignalsRepo(db);
   const narrativeFlagsRepo = createNarrativeFlagsRepo(db);
+  const alertsRepo = createAlertsRepo(db);
   const watchlistCache = createWatchlistCache(walletsRepo, logger);
   const officialStockTokens = loadOfficialStockTokens(logger);
   const httpClient = createHttpClient(env.RH_RPC_HTTP);
   const dexscreener = createDexScreenerClient(logger);
+
+  // Phase 8 (revised): Telegram is the primary + required alert channel and
+  // carries the full layered-threshold logic (< 7.0 nothing, 7.0-7.9 normal,
+  // 8.0-8.9 STRONG, >= 9.0 URGENT). Missing config disables alerting entirely
+  // (alertDispatcher logs a warning and no-ops per signal rather than
+  // crashing startup).
+  const telegramClient =
+    env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID
+      ? createTelegramClient(env.TELEGRAM_BOT_TOKEN, env.TELEGRAM_CHAT_ID, logger)
+      : undefined;
+  if (!telegramClient) {
+    logger.warn("TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not configured — alerting is disabled");
+  }
+  // Email (Resend) is retained but disabled by default — it only sends when
+  // all three vars are set, alongside every Telegram alert. Its absence is
+  // intentionally silent (no warning, no error).
+  const emailClient =
+    env.RESEND_API_KEY && env.ALERT_EMAIL_FROM && env.ALERT_EMAIL_TO
+      ? createResendClient(env.RESEND_API_KEY, logger)
+      : undefined;
+  if (emailClient) {
+    logger.info("Resend email alerting is enabled (secondary channel alongside Telegram)");
+  }
+
+  const alertDispatcher = createAlertDispatcher({
+    alertsRepo,
+    logger,
+    telegramClient,
+    emailClient,
+    emailFrom: env.ALERT_EMAIL_FROM,
+    emailTo: env.ALERT_EMAIL_TO,
+    getWalletSells: (tokenId, wallets, before) => tradesRepo.getSellTotalsByWallets(tokenId, wallets, before),
+  });
 
   await watchlistCache.refresh();
   // Event-based refresh (on API writes) covers the common case immediately;
@@ -127,6 +165,7 @@ async function main(): Promise<void> {
       tradesRepo.getLargestSellUsdSince(tokenId, before, windowMinutes),
     getNarrativeBoost: (tokenId) => narrativeFlagsRepo.getLatestBoost(tokenId),
     officialStockTokens,
+    alertDispatcher,
   });
 
   const detector = createNewTokenDetector({

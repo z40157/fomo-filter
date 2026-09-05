@@ -50,6 +50,13 @@
       "when": 1788613755113,
       "tag": "0006_black_baron_zemo",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1788618267377,
+      "tag": "0007_fine_lizard",
+      "breakpoints": true
     }
   ]
 }

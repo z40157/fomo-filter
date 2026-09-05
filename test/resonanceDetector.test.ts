@@ -53,6 +53,7 @@ function buyEvent(overrides: Partial<WatchlistBuyEvent> = {}): WatchlistBuyEvent
     tokenId: 1,
     tokenAddress: "0xTOKEN",
     tokenSymbol: "TEST",
+    tokenName: "Test Token",
     tokenPairToken: "0xPAIR",
     tokenDeployer: "0xDEPLOYER",
     tokenLaunchTime: new Date(FIXED_NOW.getTime() - 60 * 60_000), // 1h before FIXED_NOW by default

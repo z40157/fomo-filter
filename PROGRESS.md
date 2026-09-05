@@ -6,7 +6,7 @@ and their BUY/SELL trading activity as a data source for a future
 FOMO-detection/alerting system. This file exists so a new session (or a
 human) can get oriented without re-deriving everything from the code.
 
-## Status: Phase 7 complete (2026-09-05)
+## Status: Phase 8 complete (2026-09-05)
 
 - ✅ Phase 0 — Skeleton
 - ✅ Phase 1 — Chain watcher (WS + reconnect + restart recovery)
@@ -18,12 +18,14 @@ human) can get oriented without re-deriving everything from the code.
 - ✅ Phase 5 — DexScreener integration + real-time candidate tracking
 - ✅ Phase 6 — KOL resonance detection (trigger + persist only — no scoring or alerting yet)
 - ✅ Phase 7 — Importance scoring + Risk grading + Confidence rating (rule-based, no ML)
-- ⬜ Phase 8 — Alerting (not started)
-- ⬜ Everything else — `alerts` and `signalOutcomes` tables are still
-  placeholder-only (just `id`/`createdAt`). `narrativeFlags` was fleshed out
-  in Phase 7 (see below) and is no longer a placeholder.
+- ✅ Phase 8 — Alerting (Telegram-primary, layered thresholds; Resend/email
+  retained but disabled by default). **Real send test still pending** — code +
+  tests done, waiting on real `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`.
+- ⬜ Everything else — `signalOutcomes` table is still placeholder-only (just
+  `id`/`createdAt`). `alerts` was fleshed out in Phase 8, `narrativeFlags` in
+  Phase 7 — neither is a placeholder any more.
 
-Tests: 184/184 passing (`npm test`). Typecheck clean (`npm run typecheck` and
+Tests: 242/242 passing (`npm test`). Typecheck clean (`npm run typecheck` and
 `npm run typecheck:test`). `npm run build` clean.
 
 ---
@@ -508,6 +510,67 @@ one line per dimension, e.g.:
   went live will have real DexScreener data available and should show
   actual (non-UNKNOWN) risk grades under normal conditions.
 
+### Phase 8 — Alerting (`src/alerts/`, `src/db/alerts.ts`)
+Turns a scored/graded signal (Phase 7) into a real notification. **Telegram
+is the primary and only required channel**; email (Resend) is wired up but
+**off by default** — it only fires when its three env vars are all set, and
+its absence is silent (no warning, no error). Nothing in any template —
+header, body, footer — is worded as "you should buy this".
+
+- **Layered thresholds live entirely on Telegram now** (`alertLogic.ts`'s
+  `classifyAlertLevel`): `< 7.0` → nothing sent, `7.0-7.9` → normal message,
+  `8.0-8.9` → message tagged **STRONG**, `>= 9.0` → tagged **URGENT**. The
+  send/dedup decision (`decideAlert`) is a pure function mirroring
+  `resonanceLogic.ts`'s "cooldown, unless escalation" shape: first crossing
+  of 7.0 always sends; after that, a cooldown
+  (`DEFAULT_ALERT_COOLDOWN_MINUTES` = 10; the dispatcher takes an override
+  but nothing wires an env var to it yet) is only re-opened within the
+  window by one of four escalations, checked in order:
+  `score_increase` (+1.0 since last alert), `new_tier_a` (a Tier-A
+  ownerGroup appears where there was none), `owner_group_increase` (+2
+  distinct ownerGroups), `cross_9` (first-ever crossing of 9.0, even if an
+  8.x already fired). Once the cooldown fully elapses, sending resumes with
+  reason `cooldown_expired`.
+- **`alerts` table** (`schema.ts`, migration `0007_fine_lizard`): one row
+  per delivery *attempt*, not per signal — a signal that fires Telegram +
+  email gets two rows. Columns: `signal_id → signals`, `token_id → tokens`,
+  `channel` (`email`/`telegram` enum), `sent_at`, `importance_at_send`,
+  `risk_at_send`/`confidence_at_send` (nullable enums), `trigger_reason`
+  (varchar, the `AlertTriggerReason` that allowed the send),
+  `delivery_status` (`sent`/`failed` enum), `error_message`, with a
+  `(token_id, channel, sent_at)` index. Dedup/cooldown state is
+  reconstructed by `db/alerts.ts`'s `getLastSentAlert` /
+  `hasSentAtOrAbove`, both scoped to `(tokenId, 'telegram')` and joined back
+  to `signals` for the ownerGroup/Tier-A counts at that time.
+- **`telegramTemplate.ts`** renders Telegram **HTML** (`parse_mode: "HTML"`
+  in `telegramClient.ts`) — phone-readable, CA wrapped in `<code>` for
+  one-tap copy. Contents: STRONG/URGENT tag + score + symbol; Risk +
+  Confidence; token block (symbol/name, CA, MC/liq/age); smart-flow block
+  (ownerGroups, Tier-A, net USD flow, repeat buyers, 5m vol/buys/sells);
+  the six score-breakdown dimensions in a `<pre>` block; a plain-language
+  "Why triggered" (`alertTypes.ts`'s `buildWhyTriggeredText`); the
+  participating watchlist wallets (name + tier + buy amount, + sold amount
+  if any); DexScreener + Blockscout links; the fixed footer *"This is a
+  monitoring signal, NOT a buy recommendation."* **Risk=UNKNOWN or
+  Confidence=LOW is called out as a `⚠️` banner at the very top**, above the
+  header, never buried. `escapeTelegramHtml` escapes `& < >` in every
+  interpolated name/reason.
+- **`alertDispatcher.ts`** is the stateful glue: reads prior state, runs
+  `decideAlert`, enriches per-wallet SELL totals via an injected
+  `getWalletSells` (`tradesRepo.getSellTotalsByWallets`), sends Telegram +
+  records its row, then (only if fully configured) sends email + records a
+  second row. **Never throws back into the caller** — every failure is
+  caught, logged, and written as a `failed` row; `resonanceDetector.ts`
+  also wraps the `dispatch()` call in its own try/catch so a signal is
+  always safely persisted first.
+- **`resendClient.ts` / `emailTemplate.ts` are retained unchanged in spirit**
+  — email still renders the full plain-HTML report and can be re-enabled
+  later purely by setting `RESEND_API_KEY` / `ALERT_EMAIL_FROM` /
+  `ALERT_EMAIL_TO`. Shared number formatting (`formatUsd`, `formatAge`,
+  `formatQuoteAmount`, …) moved to `src/format.ts` so both templates agree.
+- **Not yet done: a real send.** All 242 tests pass against fakes; no live
+  Telegram message has been sent yet (waiting on real bot token + chat id).
+
 ---
 
 ## Key technical decisions (read this before touching trade detection)
@@ -824,8 +887,9 @@ amount exactly).
   by an order of magnitude.
 
 ## Next planned phase
-Phase 7 — Importance scoring + risk grading (in progress as of
-2026-09-05). Phase 9's planned Outcome Tracker will need Phase 7's exact
-scoring rules to be traceable after the fact — see Phase 7's section
-above once it lands for the full rule definitions, kept versioned there
-for that reason.
+Phase 8's real send test (needs a live `TELEGRAM_BOT_TOKEN` /
+`TELEGRAM_CHAT_ID`), then Phase 9 — Outcome Tracker, which will need
+Phase 7's exact scoring rules to be traceable after the fact (see the
+Phase 7 section above — the full rule definitions are kept versioned
+there for that reason) and Phase 8's `alerts` rows as its input of "what
+we told a human to look at, and when."

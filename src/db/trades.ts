@@ -53,6 +53,12 @@ export interface TradesRepo {
   hasWalletSold(tokenId: number, wallet: string): Promise<boolean>;
   /** The largest single SELL (by usd_value) for a token in the `windowMinutes` up to (and including) `before`, if any trade in that window has a known usd_value. Null if none qualify (including "none have usd_value yet"). Takes an explicit reference time rather than the wall clock so it works correctly for historical replay, not just live operation. */
   getLargestSellUsdSince(tokenId: number, before: Date, windowMinutes: number): Promise<number | null>;
+  /** Per-wallet SELL totals (raw on-chain quote_amount, same convention as signal_wallets.buy_amount) for this token, up to (and including) `before` — for alerts/alertDispatcher.ts's "Watched Wallets" table. Wallets with no SELLs are simply absent from the returned map. */
+  getSellTotalsByWallets(
+    tokenId: number,
+    wallets: string[],
+    before: Date,
+  ): Promise<Map<string, { sellAmount: bigint; sellCount: number }>>;
 }
 
 export function createTradesRepo(db: Database): TradesRepo {
@@ -172,6 +178,30 @@ export function createTradesRepo(db: Database): TradesRepo {
         .limit(1);
       const row = rows[0];
       return row?.usdValue === null || row?.usdValue === undefined ? null : Number(row.usdValue);
+    },
+
+    async getSellTotalsByWallets(tokenId, wallets, before) {
+      if (wallets.length === 0) return new Map();
+      const rows = await db
+        .select({ wallet: trades.wallet, quoteAmount: trades.quoteAmount })
+        .from(trades)
+        .where(
+          and(
+            eq(trades.tokenId, tokenId),
+            eq(trades.side, "SELL"),
+            inArray(trades.wallet, wallets),
+            lte(trades.timestamp, before),
+          ),
+        );
+
+      const result = new Map<string, { sellAmount: bigint; sellCount: number }>();
+      for (const r of rows) {
+        const existing = result.get(r.wallet) ?? { sellAmount: 0n, sellCount: 0 };
+        existing.sellAmount += BigInt(r.quoteAmount);
+        existing.sellCount += 1;
+        result.set(r.wallet, existing);
+      }
+      return result;
     },
   };
 }

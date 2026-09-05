@@ -23,6 +23,8 @@ import {
 } from "./resonanceLogic.js";
 import { computeConfidence, computeImportanceScore, type SnapshotPoint } from "./scoring.js";
 import { computeRisk } from "./risk.js";
+import { formatUsd } from "../format.js";
+import type { AlertDispatcher, AlertDispatchInput } from "../alerts/alertDispatcher.js";
 
 const DEFAULT_CLEANUP_INTERVAL_MS = 60_000;
 const RECENT_SNAPSHOTS_FOR_TREND = 5;
@@ -45,6 +47,7 @@ export interface WatchlistBuyEvent {
   tokenId: number;
   tokenAddress: string;
   tokenSymbol: string | null;
+  tokenName: string | null;
   tokenPairToken: string;
   tokenDeployer: string;
   tokenLaunchTime: Date;
@@ -74,6 +77,8 @@ export interface ResonanceDetectorDeps {
   getNarrativeBoost?: (tokenId: number) => Promise<number | null>;
   /** Lowercased official Robinhood stock-token addresses, from config/stockTokens.json. Empty by default. */
   officialStockTokens?: ReadonlySet<string>;
+  /** Phase 8: fires email/Telegram alerts for signals that clear the importance threshold and dedup rules — undefined means alerting is off entirely (never crashes or blocks signal persistence either way). */
+  alertDispatcher?: AlertDispatcher;
   now?: () => Date;
   cleanupIntervalMs?: number;
 }
@@ -91,13 +96,6 @@ function resolveOwnerGroup(wallet: WalletEntry): { ownerGroup: string; isFallbac
   // No ownerGroup on file — treat this one address as its own independent
   // group rather than silently dropping it from resonance counting.
   return { ownerGroup: wallet.address.toLowerCase(), isFallback: true };
-}
-
-function formatUsd(n: number): string {
-  const abs = Math.abs(n);
-  if (abs >= 1_000_000) return `$${(n / 1_000_000).toFixed(1)}M`;
-  if (abs >= 1_000) return `$${(n / 1_000).toFixed(1)}K`;
-  return `$${n.toFixed(0)}`;
 }
 
 export function createResonanceDetector(deps: ResonanceDetectorDeps): ResonanceDetector {
@@ -305,6 +303,50 @@ export function createResonanceDetector(deps: ResonanceDetectorDeps): ResonanceD
         `  Earlyness ${scoreBreakdown.earlyness.score.toFixed(1)}/${scoreBreakdown.earlyness.max} (age ${(ageMs / 60_000).toFixed(0)}min)`,
       ];
       deps.logger.info(summaryLines.join("\n"));
+
+      // Phase 8: email/Telegram alerting — entirely best-effort. dispatch()
+      // already catches everything internally, but the extra guard here
+      // means even a misbehaving test double or future refactor can never
+      // turn an alert failure into a lost/blocked signal.
+      const alertInput: AlertDispatchInput = {
+        signalId,
+        tokenId: event.tokenId,
+        tokenAddress: event.tokenAddress,
+        tokenSymbol: event.tokenSymbol,
+        tokenName: event.tokenName,
+        ageMs,
+        triggerConditions: conditions,
+        windowMinutes: config.windowMinutes,
+        distinctOwnerGroups: stats.distinctOwnerGroups,
+        tierACount: stats.tierAOwnerGroups,
+        hasRepeatAccumulation: stats.hasRepeatAccumulation,
+        marketCap: marketSnapshot?.marketCap ?? null,
+        liquidity: marketSnapshot?.liquidity ?? null,
+        volume5m: marketSnapshot?.volume5m ?? null,
+        buys5m: marketSnapshot?.buys5m ?? null,
+        sells5m: marketSnapshot?.sells5m ?? null,
+        aggregateWatchedBuyUsd: flowState.aggregateWatchedBuyUsd,
+        aggregateWatchedSellUsd: flowState.aggregateWatchedSellUsd,
+        repeatBuyerCount: flowState.repeatBuyerCount,
+        importanceScore,
+        scoreBreakdown,
+        riskLevel,
+        riskBreakdown,
+        confidence: confidenceLevel,
+        confidenceReasons,
+        wallets: walletBreakdown.map((w) => ({
+          address: w.wallet,
+          name: w.name,
+          tier: w.tier,
+          buyAmount: w.buyAmount,
+          buyCount: w.buyCount,
+        })),
+      };
+      try {
+        await deps.alertDispatcher?.dispatch(alertInput);
+      } catch (err) {
+        deps.logger.error({ err, signalId, token: event.tokenAddress }, "alert dispatch threw unexpectedly — signal itself is already safely persisted");
+      }
     },
 
     stop() {
