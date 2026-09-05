@@ -141,7 +141,7 @@ export interface NewTokenDetectorDeps {
   httpClient: DetectorHttpClient;
   tokensRepo: TokensRepo;
   logger: Logger;
-  /** Max block span per getLogs call. Default 5 (QuickNode's plan limit for this chain). */
+  /** Max block span per getLogs call. Default 10,000 (QuickNode Build plan's limit for this chain). */
   maxLogsBlockRange?: bigint;
 }
 
@@ -150,7 +150,7 @@ export interface NewTokenDetector {
 }
 
 export function createNewTokenDetector(deps: NewTokenDetectorDeps): NewTokenDetector {
-  const chunkSize = deps.maxLogsBlockRange ?? 5n;
+  const chunkSize = deps.maxLogsBlockRange ?? 10_000n;
 
   async function recordToken(token: NewToken): Promise<void> {
     const inserted = await deps.tokensRepo.insertIfNew(token);
@@ -188,6 +188,7 @@ export function createNewTokenDetector(deps: NewTokenDetectorDeps): NewTokenDete
         launchBlock: log.blockNumber,
         launchTime: new Date(Number(timestamp) * 1000),
         launchTx: log.transactionHash,
+        initializer: log.args.initializer,
       });
     } catch (err) {
       deps.logger.error(

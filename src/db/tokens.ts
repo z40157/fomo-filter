@@ -1,4 +1,4 @@
-import { count } from "drizzle-orm";
+import { and, count, eq, isNull } from "drizzle-orm";
 import type { Database } from "./client.js";
 import { tokens } from "./schema.js";
 
@@ -15,12 +15,29 @@ export interface NewToken {
   launchBlock: bigint;
   launchTime: Date;
   launchTx: string;
+  /** Doppler-only: the pool-initializer/hook contract address. Omit for other sources. */
+  initializer?: string | null;
+}
+
+export interface TrackedToken {
+  id: number;
+  address: string;
+  launchSource: LaunchSource;
+  pairToken: string;
+  pool: string;
+  launchBlock: bigint;
+  initializer: string | null;
+  poolId: string | null;
 }
 
 export interface TokensRepo {
   /** Inserts the token, ignoring the write if `address` already exists. Returns true if a new row was inserted. */
   insertIfNew(token: NewToken): Promise<boolean>;
   countTokens(): Promise<number>;
+  /** All tracked tokens, for trade-detection to build its watch lists from. */
+  listAll(): Promise<TrackedToken[]>;
+  /** Persists a lazily-resolved Doppler PoolId once observed on-chain. */
+  setPoolId(tokenId: number, poolId: string): Promise<void>;
 }
 
 export function createTokensRepo(db: Database): TokensRepo {
@@ -37,6 +54,28 @@ export function createTokensRepo(db: Database): TokensRepo {
     async countTokens() {
       const rows = await db.select({ value: count() }).from(tokens);
       return rows[0]?.value ?? 0;
+    },
+
+    async listAll() {
+      return db
+        .select({
+          id: tokens.id,
+          address: tokens.address,
+          launchSource: tokens.launchSource,
+          pairToken: tokens.pairToken,
+          pool: tokens.pool,
+          launchBlock: tokens.launchBlock,
+          initializer: tokens.initializer,
+          poolId: tokens.poolId,
+        })
+        .from(tokens);
+    },
+
+    async setPoolId(tokenId, poolId) {
+      await db
+        .update(tokens)
+        .set({ poolId })
+        .where(and(eq(tokens.id, tokenId), isNull(tokens.poolId)));
     },
   };
 }

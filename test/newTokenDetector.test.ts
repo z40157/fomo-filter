@@ -45,6 +45,12 @@ function fakeTokensRepo(): TokensRepo & { rows: Map<string, NewToken> } {
     async countTokens() {
       return rows.size;
     },
+    async listAll() {
+      return [];
+    },
+    async setPoolId() {
+      // not exercised by these tests
+    },
   };
 }
 
