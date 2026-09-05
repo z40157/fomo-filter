@@ -2,6 +2,7 @@ import { encodeAbiParameters, keccak256, parseAbiItem, ResponseBodyTooLargeError
 import type { Logger } from "../logger.js";
 import type { NewTrade, TradeSide, TradesRepo } from "../db/trades.js";
 import type { TokensRepo, TrackedToken } from "../db/tokens.js";
+import type { WatchlistCache } from "../watchlist/watchlistCache.js";
 import type { HttpClient } from "./client.js";
 import { chunkBlockRange } from "./newTokenDetector.js";
 
@@ -222,6 +223,7 @@ export interface TradeDetectorDeps {
   httpClient: TradeDetectorHttpClient;
   tokensRepo: TokensRepo;
   tradesRepo: TradesRepo;
+  watchlistCache: WatchlistCache;
   logger: Logger;
   /** Max block span per getLogs call. Default 10,000 (QuickNode Build plan's limit for this chain). */
   maxLogsBlockRange?: bigint;
@@ -324,6 +326,23 @@ export function createTradeDetector(deps: TradeDetectorDeps): TradeDetector {
           { token: params.token.address, side: params.side, wallet, tx: params.transactionHash },
           "trade recorded",
         );
+
+        const watched = deps.watchlistCache.lookup(wallet);
+        if (watched) {
+          deps.logger.info(
+            {
+              walletName: watched.name,
+              tier: watched.tier,
+              ownerGroup: watched.ownerGroup,
+              token: params.token.address,
+              side: params.side,
+              quoteAmount: trade.quoteAmount,
+              tokenAmount: trade.tokenAmount,
+              tx: params.transactionHash,
+            },
+            "watchlist wallet trade",
+          );
+        }
       } else {
         deps.logger.debug(
           { tx: params.transactionHash, logIndex: params.logIndex },

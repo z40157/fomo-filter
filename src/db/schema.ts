@@ -1,10 +1,12 @@
 import {
   bigint,
+  boolean,
   integer,
   numeric,
   pgEnum,
   pgTable,
   serial,
+  text,
   timestamp,
   unique,
   varchar,
@@ -76,9 +78,25 @@ export const trades = pgTable(
   (table) => [unique("trades_chain_tx_log_unique").on(table.chainId, table.txHash, table.logIndex)],
 );
 
+export const walletTypeEnum = pgEnum("wallet_type", ["KOL", "FOMO_TRADER", "SMART_MONEY"]);
+export const walletTierEnum = pgEnum("wallet_tier", ["A", "B", "C"]);
+
+// V1 is entirely manually curated — no auto-classification of who's a KOL.
+// This table only stores, dedups (address is the PK, always lowercased),
+// and gets compared against during trade parsing.
 export const walletWatchlist = pgTable("wallet_watchlist", {
-  id: serial("id").primaryKey(),
+  address: varchar("address", { length: 42 }).primaryKey(),
+  name: varchar("name", { length: 256 }).notNull(),
+  type: walletTypeEnum("type").notNull(),
+  tier: walletTierEnum("tier").notNull(),
+  // Groups multiple addresses controlled by the same real-world entity, so
+  // later resonance/co-buy detection counts distinct owners, not addresses
+  // — one person running 5 wallets must never look like 5 independent KOLs.
+  ownerGroup: varchar("owner_group", { length: 128 }).notNull(),
+  enabled: boolean("enabled").notNull().default(true),
+  notes: text("notes"),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 });
 
 export const tokenSnapshots = pgTable("token_snapshots", {

@@ -5,10 +5,14 @@ import { createDb, checkDatabase } from "./db/client.js";
 import { createScannerStateRepo } from "./db/scannerState.js";
 import { createTokensRepo } from "./db/tokens.js";
 import { createTradesRepo } from "./db/trades.js";
+import { createWalletWatchlistRepo } from "./db/walletWatchlist.js";
+import { createWatchlistCache } from "./watchlist/watchlistCache.js";
 import { CHAIN_ID, createHttpClient, createWsClient } from "./chain/client.js";
 import { ChainWatcher } from "./chain/watcher.js";
 import { createDetectorHttpClient, createNewTokenDetector } from "./chain/newTokenDetector.js";
 import { createTradeDetectorHttpClient, createTradeDetector } from "./chain/tradeDetector.js";
+
+const WATCHLIST_REFRESH_INTERVAL_MS = 60_000;
 
 async function main(): Promise<void> {
   const env = loadEnv();
@@ -18,7 +22,20 @@ async function main(): Promise<void> {
   const scannerStateRepo = createScannerStateRepo(db);
   const tokensRepo = createTokensRepo(db);
   const tradesRepo = createTradesRepo(db);
+  const walletsRepo = createWalletWatchlistRepo(db);
+  const watchlistCache = createWatchlistCache(walletsRepo, logger);
   const httpClient = createHttpClient(env.RH_RPC_HTTP);
+
+  await watchlistCache.refresh();
+  // Event-based refresh (on API writes) covers the common case immediately;
+  // this periodic sweep also picks up out-of-band changes — e.g. someone
+  // running `npm run wallets:import` in a separate process — that the live
+  // server would otherwise never hear about.
+  setInterval(() => {
+    watchlistCache.refresh().catch((err: unknown) => {
+      logger.error({ err }, "periodic watchlist cache refresh failed");
+    });
+  }, WATCHLIST_REFRESH_INTERVAL_MS).unref();
 
   const detector = createNewTokenDetector({
     dopplerAirlockAddress: env.DOPPLER_AIRLOCK_ADDRESS as `0x${string}`,
@@ -33,6 +50,7 @@ async function main(): Promise<void> {
     httpClient: createTradeDetectorHttpClient(httpClient),
     tokensRepo,
     tradesRepo,
+    watchlistCache,
     logger,
   });
 
@@ -63,6 +81,9 @@ async function main(): Promise<void> {
     watcher,
     checkDatabase: () => checkDatabase(db),
     countTrackedTokens: () => tokensRepo.countTokens(),
+    walletsRepo,
+    watchlistCache,
+    adminApiKey: env.ADMIN_API_KEY,
   });
 
   try {

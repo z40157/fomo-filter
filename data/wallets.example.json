@@ -1,0 +1,28 @@
+[
+  {
+    "address": "0x1234567890123456789012345678901234567890",
+    "name": "KOL_张三",
+    "type": "KOL",
+    "tier": "A",
+    "ownerGroup": "zhangsan",
+    "enabled": true,
+    "notes": "Example only — replace with a real address before importing."
+  },
+  {
+    "address": "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
+    "name": "SmartMoney_01",
+    "type": "SMART_MONEY",
+    "tier": "B",
+    "ownerGroup": "smartmoney_01",
+    "enabled": true
+  },
+  {
+    "address": "0x1234567890123456789012345678901234567891",
+    "name": "KOL_张三_小号",
+    "type": "KOL",
+    "tier": "A",
+    "ownerGroup": "zhangsan",
+    "enabled": true,
+    "notes": "Second wallet for the same person as the first entry — same ownerGroup so resonance detection counts them as one owner."
+  }
+]

@@ -8,6 +8,7 @@ interface HealthResponse {
   lastBlock: number | null;
   database: "ok" | "error";
   trackedTokens: number;
+  watchedWallets: number;
 }
 
 export function healthRoutes(ctx: AppContext) {
@@ -26,6 +27,7 @@ export function healthRoutes(ctx: AppContext) {
         lastBlock: status.lastBlock === null ? null : Number(status.lastBlock),
         database,
         trackedTokens,
+        watchedWallets: ctx.watchlistCache.size(),
       };
     });
   };

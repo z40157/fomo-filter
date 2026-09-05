@@ -16,7 +16,8 @@
     "typecheck": "tsc --noEmit",
     "typecheck:test": "tsc -p tsconfig.test.json",
     "db:generate": "drizzle-kit generate",
-    "db:migrate": "drizzle-kit migrate"
+    "db:migrate": "drizzle-kit migrate",
+    "wallets:import": "tsx --env-file-if-exists=.env src/scripts/importWallets.ts"
   },
   "dependencies": {
     "drizzle-orm": "^0.36.4",

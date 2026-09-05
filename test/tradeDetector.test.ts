@@ -10,6 +10,8 @@ import {
 } from "../src/chain/tradeDetector.js";
 import type { NewToken, TokensRepo, TrackedToken } from "../src/db/tokens.js";
 import type { NewTrade, TradesRepo } from "../src/db/trades.js";
+import type { WalletEntry } from "../src/db/walletWatchlist.js";
+import type { WatchlistCache } from "../src/watchlist/watchlistCache.js";
 import type { Logger } from "../src/logger.js";
 
 const CHAIN_ID = 4663;
@@ -164,6 +166,30 @@ function ponsSwapLog(overrides: Partial<PonsSwapArgs> = {}, logOverrides: Partia
 
 const WALLET = "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd" as const;
 
+function fakeWatchlistCache(entries: WalletEntry[] = []): WatchlistCache {
+  const byAddress = new Map(entries.map((e) => [e.address.toLowerCase(), e]));
+  return {
+    lookup: (address) => byAddress.get(address.toLowerCase()),
+    refresh: async () => {},
+    size: () => byAddress.size,
+  };
+}
+
+function watchlistEntry(overrides: Partial<WalletEntry> = {}): WalletEntry {
+  return {
+    address: WALLET,
+    name: "KOL_test",
+    type: "KOL",
+    tier: "A",
+    ownerGroup: "test-owner",
+    enabled: true,
+    notes: null,
+    createdAt: new Date("2026-01-01T00:00:00Z"),
+    updatedAt: new Date("2026-01-01T00:00:00Z"),
+    ...overrides,
+  };
+}
+
 function makeHttpClient(overrides: Partial<TradeDetectorHttpClient> = {}): TradeDetectorHttpClient {
   return {
     getDopplerModifyLiquidityLogs: vi.fn(async () => []),
@@ -189,6 +215,7 @@ describe("TradeDetector — Doppler BUY parsing", () => {
       httpClient,
       tokensRepo,
       tradesRepo,
+      watchlistCache: fakeWatchlistCache(),
       logger: fakeLogger(),
     });
 
@@ -222,6 +249,7 @@ describe("TradeDetector — Doppler SELL parsing", () => {
       httpClient,
       tokensRepo,
       tradesRepo,
+      watchlistCache: fakeWatchlistCache(),
       logger: fakeLogger(),
     });
 
@@ -245,6 +273,7 @@ describe("TradeDetector — Pons V1 BUY/SELL parsing", () => {
       httpClient,
       tokensRepo,
       tradesRepo,
+      watchlistCache: fakeWatchlistCache(),
       logger: fakeLogger(),
     });
 
@@ -271,6 +300,7 @@ describe("TradeDetector — Pons V1 BUY/SELL parsing", () => {
       httpClient,
       tokensRepo,
       tradesRepo,
+      watchlistCache: fakeWatchlistCache(),
       logger: fakeLogger(),
     });
 
@@ -298,6 +328,7 @@ describe("TradeDetector — Transfer/airdrop exclusion", () => {
       httpClient,
       tokensRepo,
       tradesRepo,
+      watchlistCache: fakeWatchlistCache(),
       logger: fakeLogger(),
     });
 
@@ -320,6 +351,7 @@ describe("TradeDetector — duplicate (chain_id, tx_hash, log_index) handling", 
       httpClient,
       tokensRepo,
       tradesRepo,
+      watchlistCache: fakeWatchlistCache(),
       logger: fakeLogger(),
     });
 
@@ -345,6 +377,7 @@ describe("TradeDetector — watch-address derivation", () => {
       httpClient,
       tokensRepo,
       tradesRepo,
+      watchlistCache: fakeWatchlistCache(),
       logger: fakeLogger(),
     });
 
@@ -360,5 +393,64 @@ describe("TradeDetector — watch-address derivation", () => {
       fromBlock: 300n,
       toBlock: 300n,
     });
+  });
+});
+
+describe("TradeDetector — watchlist hit logging", () => {
+  it("logs a watchlist hit when the trade's wallet is an enabled watched address", async () => {
+    const tokensRepo = fakeTokensRepo([dopplerToken({ poolId: DOPPLER_POOL_ID })]);
+    const tradesRepo = fakeTradesRepo();
+    const httpClient = makeHttpClient({
+      getDopplerSwapLogs: vi.fn(async () => [dopplerSwapLog()]),
+    });
+    const logger = fakeLogger();
+    const watched = watchlistEntry({ name: "KOL_张三", tier: "A", ownerGroup: "zhangsan" });
+
+    const detector = createTradeDetector({
+      chainId: CHAIN_ID,
+      httpClient,
+      tokensRepo,
+      tradesRepo,
+      watchlistCache: fakeWatchlistCache([watched]),
+      logger,
+    });
+
+    await detector.processBlockRange(105n, 105n);
+
+    expect(tradesRepo.rows).toHaveLength(1);
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({
+        walletName: "KOL_张三",
+        tier: "A",
+        ownerGroup: "zhangsan",
+        token: DOPPLER_ASSET,
+        side: "BUY",
+        quoteAmount: "5",
+        tokenAmount: "1000",
+      }),
+      "watchlist wallet trade",
+    );
+  });
+
+  it("does not log a watchlist hit for a wallet that isn't on the list", async () => {
+    const tokensRepo = fakeTokensRepo([dopplerToken({ poolId: DOPPLER_POOL_ID })]);
+    const tradesRepo = fakeTradesRepo();
+    const httpClient = makeHttpClient({
+      getDopplerSwapLogs: vi.fn(async () => [dopplerSwapLog()]),
+    });
+    const logger = fakeLogger();
+
+    const detector = createTradeDetector({
+      chainId: CHAIN_ID,
+      httpClient,
+      tokensRepo,
+      tradesRepo,
+      watchlistCache: fakeWatchlistCache([]),
+      logger,
+    });
+
+    await detector.processBlockRange(105n, 105n);
+
+    expect(logger.info).not.toHaveBeenCalledWith(expect.anything(), "watchlist wallet trade");
   });
 });
