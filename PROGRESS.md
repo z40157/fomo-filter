@@ -19,8 +19,9 @@ human) can get oriented without re-deriving everything from the code.
 - ✅ Phase 6 — KOL resonance detection (trigger + persist only — no scoring or alerting yet)
 - ✅ Phase 7 — Importance scoring + Risk grading + Confidence rating (rule-based, no ML)
 - ✅ Phase 8 — Alerting (Telegram-primary, layered thresholds; Resend/email
-  retained but disabled by default). **Real send test still pending** — code +
-  tests done, waiting on real `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`.
+  retained but disabled by default). **Real send test done 2026-09-05** — 3
+  live messages (NORMAL / STRONG / URGENT+UNKNOWN+LOW) delivered to the real
+  bot+chat, Telegram accepted the HTML in every one.
 - ⬜ Everything else — `signalOutcomes` table is still placeholder-only (just
   `id`/`createdAt`). `alerts` was fleshed out in Phase 8, `narrativeFlags` in
   Phase 7 — neither is a placeholder any more.
@@ -568,8 +569,17 @@ header, body, footer — is worded as "you should buy this".
   later purely by setting `RESEND_API_KEY` / `ALERT_EMAIL_FROM` /
   `ALERT_EMAIL_TO`. Shared number formatting (`formatUsd`, `formatAge`,
   `formatQuoteAmount`, …) moved to `src/format.ts` so both templates agree.
-- **Not yet done: a real send.** All 242 tests pass against fakes; no live
-  Telegram message has been sent yet (waiting on real bot token + chat id).
+- **Real send test (2026-09-05).** With a real bot token + chat id in
+  `.env` (gitignored), three mock signals covering all three bands —
+  NORMAL (7.4), STRONG (8.5), and URGENT (9.3) with `riskLevel: UNKNOWN` /
+  `confidence: LOW` — were rendered through the real `renderTelegramMessage`
+  and sent via the real `createTelegramClient`. All three returned
+  `{ ok: true }` (Telegram's API rejects malformed HTML with a 400, so an
+  `ok` is also proof the `parse_mode: "HTML"` markup is well-formed).
+  Message sizes 1.1-1.5 KB, well under the 4 KB Telegram limit. The URGENT
+  message correctly led with both `⚠️` banners above the header; the
+  `<pre>` score-breakdown block and `<code>`-wrapped CA rendered as
+  intended. Sender script was a throwaway (not committed).
 
 ---
 
@@ -887,9 +897,7 @@ amount exactly).
   by an order of magnitude.
 
 ## Next planned phase
-Phase 8's real send test (needs a live `TELEGRAM_BOT_TOKEN` /
-`TELEGRAM_CHAT_ID`), then Phase 9 — Outcome Tracker, which will need
-Phase 7's exact scoring rules to be traceable after the fact (see the
-Phase 7 section above — the full rule definitions are kept versioned
-there for that reason) and Phase 8's `alerts` rows as its input of "what
-we told a human to look at, and when."
+Phase 9 — Outcome Tracker, which will need Phase 7's exact scoring rules
+to be traceable after the fact (see the Phase 7 section above — the full
+rule definitions are kept versioned there for that reason) and Phase 8's
+`alerts` rows as its input of "what we told a human to look at, and when."
