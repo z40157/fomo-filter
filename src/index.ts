@@ -7,6 +7,7 @@ import { createTokensRepo } from "./db/tokens.js";
 import { createTradesRepo } from "./db/trades.js";
 import { createWalletWatchlistRepo } from "./db/walletWatchlist.js";
 import { createTokenSnapshotsRepo } from "./db/tokenSnapshots.js";
+import { createSignalsRepo } from "./db/signals.js";
 import { createWatchlistCache } from "./watchlist/watchlistCache.js";
 import { CHAIN_ID, createHttpClient, createWsClient } from "./chain/client.js";
 import { ChainWatcher } from "./chain/watcher.js";
@@ -16,6 +17,8 @@ import { createDexScreenerClient } from "./market/dexscreener.js";
 import { createCandidateTracker } from "./market/candidateTracker.js";
 import type { TrackerConfig } from "./market/candidateTrackerLogic.js";
 import { createErc20DecimalsResolver, createUsdEnrichmentJob } from "./market/usdEnrichment.js";
+import { createResonanceDetector } from "./signals/resonanceDetector.js";
+import type { ResonanceConfig } from "./signals/resonanceLogic.js";
 
 const WATCHLIST_REFRESH_INTERVAL_MS = 60_000;
 const USD_ENRICHMENT_INTERVAL_MS = 30_000;
@@ -38,6 +41,16 @@ function trackerConfigFromEnv(env: {
   return overrides;
 }
 
+function resonanceConfigFromEnv(env: {
+  RESONANCE_WINDOW_MINUTES?: number;
+  RESONANCE_COOLDOWN_MINUTES?: number;
+}): Partial<ResonanceConfig> {
+  const overrides: Partial<ResonanceConfig> = {};
+  if (env.RESONANCE_WINDOW_MINUTES !== undefined) overrides.windowMinutes = env.RESONANCE_WINDOW_MINUTES;
+  if (env.RESONANCE_COOLDOWN_MINUTES !== undefined) overrides.cooldownMinutes = env.RESONANCE_COOLDOWN_MINUTES;
+  return overrides;
+}
+
 async function main(): Promise<void> {
   const env = loadEnv();
   const logger = createLogger(env.LOG_LEVEL);
@@ -48,6 +61,7 @@ async function main(): Promise<void> {
   const tradesRepo = createTradesRepo(db);
   const walletsRepo = createWalletWatchlistRepo(db);
   const snapshotsRepo = createTokenSnapshotsRepo(db);
+  const signalsRepo = createSignalsRepo(db);
   const watchlistCache = createWatchlistCache(walletsRepo, logger);
   const httpClient = createHttpClient(env.RH_RPC_HTTP);
   const dexscreener = createDexScreenerClient(logger);
@@ -63,6 +77,25 @@ async function main(): Promise<void> {
     });
   }, WATCHLIST_REFRESH_INTERVAL_MS).unref();
 
+  // Constructed before tradeDetector since resonanceDetector reads its
+  // in-memory market snapshots — started later, after the watcher.
+  const candidateTracker = createCandidateTracker({
+    tokensRepo,
+    tradesRepo,
+    snapshotsRepo,
+    dexscreener,
+    watchlistCache,
+    logger,
+    config: trackerConfigFromEnv(env),
+  });
+
+  const resonanceDetector = createResonanceDetector({
+    signalsRepo,
+    logger,
+    config: resonanceConfigFromEnv(env),
+    getMarketSnapshot: (tokenId) => candidateTracker.getLatestMarketSnapshot(tokenId),
+  });
+
   const detector = createNewTokenDetector({
     dopplerAirlockAddress: env.DOPPLER_AIRLOCK_ADDRESS as `0x${string}`,
     ponsV1FactoryAddress: env.PONS_V1_FACTORY_ADDRESS as `0x${string}`,
@@ -77,6 +110,7 @@ async function main(): Promise<void> {
     tokensRepo,
     tradesRepo,
     watchlistCache,
+    resonanceDetector,
     logger,
   });
 
@@ -101,15 +135,6 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const candidateTracker = createCandidateTracker({
-    tokensRepo,
-    tradesRepo,
-    snapshotsRepo,
-    dexscreener,
-    watchlistCache,
-    logger,
-    config: trackerConfigFromEnv(env),
-  });
   await candidateTracker.start();
 
   // Backfills trades.usd_value from DexScreener snapshots. Runs on its own
@@ -134,6 +159,12 @@ async function main(): Promise<void> {
     adminApiKey: env.ADMIN_API_KEY,
     countActiveCandidates: () => candidateTracker.getActiveCandidateCount(),
     getDexScreenerStatus: () => dexscreener.getStatus(),
+    countSignalsToday: () => {
+      const startOfDay = new Date();
+      startOfDay.setHours(0, 0, 0, 0);
+      return signalsRepo.countSince(startOfDay);
+    },
+    getLastSignalAt: () => signalsRepo.lastTriggeredAt(),
   });
 
   try {

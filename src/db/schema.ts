@@ -125,13 +125,56 @@ export const tokenSnapshots = pgTable(
   (table) => [index("token_snapshots_token_id_snapshot_at_idx").on(table.tokenId, table.snapshotAt)],
 );
 
-export const signals = pgTable("signals", {
-  id: serial("id").primaryKey(),
-  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-});
+export const signalTriggerConditionEnum = pgEnum("signal_trigger_condition", ["A", "B", "C"]);
 
+// A resonance signal is a TRIGGER, not a buy recommendation — see
+// signals/resonanceLogic.ts. This table only records that the detector
+// fired and why; scoring (Phase 7) and alerting (Phase 8) are separate.
+export const signals = pgTable(
+  "signals",
+  {
+    id: serial("id").primaryKey(),
+    tokenId: integer("token_id")
+      .notNull()
+      .references(() => tokens.id),
+    triggeredAt: timestamp("triggered_at", { withTimezone: true }).notNull(),
+    // Can hold more than one condition — they're independent checks and a
+    // window can satisfy several at once.
+    triggerConditions: signalTriggerConditionEnum("trigger_conditions").array().notNull(),
+    distinctOwnerGroups: integer("distinct_owner_groups").notNull(),
+    tierACount: integer("tier_a_count").notNull(),
+    hasRepeatAccumulation: boolean("has_repeat_accumulation").notNull(),
+    // The window size THIS signal used — config can change later, so this
+    // is what lets you re-interpret an old signal correctly.
+    windowMinutes: integer("window_minutes").notNull(),
+    // True if this signal broke through an active cooldown because the
+    // window got strictly stronger (see resonanceLogic.ts).
+    escalation: boolean("escalation").notNull().default(false),
+    // From candidateTracker's in-memory DexScreener snapshot at trigger
+    // time — null if none was available yet (e.g. a brand new token).
+    marketCap: numeric("market_cap", { precision: 38, scale: 2 }),
+    liquidity: numeric("liquidity", { precision: 38, scale: 2 }),
+    volume5m: numeric("volume_5m", { precision: 38, scale: 2 }),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [index("signals_token_id_triggered_at_idx").on(table.tokenId, table.triggeredAt)],
+);
+
+// One row per participating wallet for a given signal — who triggered it.
 export const signalWallets = pgTable("signal_wallets", {
   id: serial("id").primaryKey(),
+  signalId: integer("signal_id")
+    .notNull()
+    .references(() => signals.id),
+  walletAddress: varchar("wallet_address", { length: 42 }).notNull(),
+  walletName: varchar("wallet_name", { length: 256 }).notNull(),
+  tier: walletTierEnum("tier").notNull(),
+  ownerGroup: varchar("owner_group", { length: 128 }).notNull(),
+  buyCount: integer("buy_count").notNull(),
+  // Raw on-chain integer, same convention as trades.quote_amount — this
+  // token's own quote currency, not USD (comparable across wallets within
+  // one signal, since they share a token/quote currency; not across signals).
+  buyAmount: numeric("buy_amount", { precision: 78, scale: 0 }).notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 });
 

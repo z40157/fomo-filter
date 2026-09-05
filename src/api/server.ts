@@ -18,6 +18,8 @@ export interface AppContext {
   adminApiKey: string | undefined;
   countActiveCandidates: () => number;
   getDexScreenerStatus: () => DexScreenerStatus;
+  countSignalsToday: () => Promise<number>;
+  getLastSignalAt: () => Promise<Date | null>;
 }
 
 export function buildServer(ctx: AppContext) {

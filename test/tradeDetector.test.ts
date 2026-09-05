@@ -12,6 +12,7 @@ import type { NewToken, TokensRepo, TrackedToken } from "../src/db/tokens.js";
 import type { NewTrade, TradesRepo } from "../src/db/trades.js";
 import type { WalletEntry } from "../src/db/walletWatchlist.js";
 import type { WatchlistCache } from "../src/watchlist/watchlistCache.js";
+import type { ResonanceDetector, WatchlistBuyEvent } from "../src/signals/resonanceDetector.js";
 import type { Logger } from "../src/logger.js";
 
 const CHAIN_ID = 4663;
@@ -195,6 +196,20 @@ function fakeWatchlistCache(entries: WalletEntry[] = []): WatchlistCache {
   };
 }
 
+function fakeResonanceDetector(): ResonanceDetector & { events: WatchlistBuyEvent[] } {
+  const events: WatchlistBuyEvent[] = [];
+  return {
+    events,
+    async onWatchlistBuy(event) {
+      events.push(event);
+    },
+    stop() {},
+    getWindowEntryCount() {
+      return 0;
+    },
+  };
+}
+
 function watchlistEntry(overrides: Partial<WalletEntry> = {}): WalletEntry {
   return {
     address: WALLET,
@@ -236,6 +251,7 @@ describe("TradeDetector — Doppler BUY parsing", () => {
       tokensRepo,
       tradesRepo,
       watchlistCache: fakeWatchlistCache(),
+      resonanceDetector: fakeResonanceDetector(),
       logger: fakeLogger(),
     });
 
@@ -270,6 +286,7 @@ describe("TradeDetector — Doppler SELL parsing", () => {
       tokensRepo,
       tradesRepo,
       watchlistCache: fakeWatchlistCache(),
+      resonanceDetector: fakeResonanceDetector(),
       logger: fakeLogger(),
     });
 
@@ -294,6 +311,7 @@ describe("TradeDetector — Pons V1 BUY/SELL parsing", () => {
       tokensRepo,
       tradesRepo,
       watchlistCache: fakeWatchlistCache(),
+      resonanceDetector: fakeResonanceDetector(),
       logger: fakeLogger(),
     });
 
@@ -321,6 +339,7 @@ describe("TradeDetector — Pons V1 BUY/SELL parsing", () => {
       tokensRepo,
       tradesRepo,
       watchlistCache: fakeWatchlistCache(),
+      resonanceDetector: fakeResonanceDetector(),
       logger: fakeLogger(),
     });
 
@@ -349,6 +368,7 @@ describe("TradeDetector — Transfer/airdrop exclusion", () => {
       tokensRepo,
       tradesRepo,
       watchlistCache: fakeWatchlistCache(),
+      resonanceDetector: fakeResonanceDetector(),
       logger: fakeLogger(),
     });
 
@@ -372,6 +392,7 @@ describe("TradeDetector — duplicate (chain_id, tx_hash, log_index) handling", 
       tokensRepo,
       tradesRepo,
       watchlistCache: fakeWatchlistCache(),
+      resonanceDetector: fakeResonanceDetector(),
       logger: fakeLogger(),
     });
 
@@ -398,6 +419,7 @@ describe("TradeDetector — watch-address derivation", () => {
       tokensRepo,
       tradesRepo,
       watchlistCache: fakeWatchlistCache(),
+      resonanceDetector: fakeResonanceDetector(),
       logger: fakeLogger(),
     });
 
@@ -432,6 +454,7 @@ describe("TradeDetector — watchlist hit logging", () => {
       tokensRepo,
       tradesRepo,
       watchlistCache: fakeWatchlistCache([watched]),
+      resonanceDetector: fakeResonanceDetector(),
       logger,
     });
 
@@ -466,11 +489,92 @@ describe("TradeDetector — watchlist hit logging", () => {
       tokensRepo,
       tradesRepo,
       watchlistCache: fakeWatchlistCache([]),
+      resonanceDetector: fakeResonanceDetector(),
       logger,
     });
 
     await detector.processBlockRange(105n, 105n);
 
     expect(logger.info).not.toHaveBeenCalledWith(expect.anything(), "watchlist wallet trade");
+  });
+});
+
+describe("TradeDetector — resonance detection integration", () => {
+  it("notifies the resonance detector on a watchlist wallet's BUY", async () => {
+    const tokensRepo = fakeTokensRepo([dopplerToken({ poolId: DOPPLER_POOL_ID })]);
+    const tradesRepo = fakeTradesRepo();
+    const httpClient = makeHttpClient({
+      getDopplerSwapLogs: vi.fn(async () => [dopplerSwapLog()]), // amount1=1000n -> BUY
+    });
+    const watched = watchlistEntry({ name: "KOL_test", tier: "A", ownerGroup: "owner-1" });
+    const resonanceDetector = fakeResonanceDetector();
+
+    const detector = createTradeDetector({
+      chainId: CHAIN_ID,
+      httpClient,
+      tokensRepo,
+      tradesRepo,
+      watchlistCache: fakeWatchlistCache([watched]),
+      resonanceDetector,
+      logger: fakeLogger(),
+    });
+
+    await detector.processBlockRange(105n, 105n);
+
+    expect(resonanceDetector.events).toHaveLength(1);
+    expect(resonanceDetector.events[0]).toMatchObject({
+      tokenId: 1,
+      tokenAddress: DOPPLER_ASSET,
+      wallet: watched,
+      quoteAmount: 5n,
+    });
+  });
+
+  it("does NOT notify the resonance detector on a watchlist wallet's SELL — only BUY counts", async () => {
+    const tokensRepo = fakeTokensRepo([dopplerToken({ poolId: DOPPLER_POOL_ID })]);
+    const tradesRepo = fakeTradesRepo();
+    const httpClient = makeHttpClient({
+      getDopplerSwapLogs: vi.fn(async () => [dopplerSwapLog({ amount0: 9n, amount1: -2000n })]), // SELL
+    });
+    const watched = watchlistEntry();
+    const resonanceDetector = fakeResonanceDetector();
+
+    const detector = createTradeDetector({
+      chainId: CHAIN_ID,
+      httpClient,
+      tokensRepo,
+      tradesRepo,
+      watchlistCache: fakeWatchlistCache([watched]),
+      resonanceDetector,
+      logger: fakeLogger(),
+    });
+
+    await detector.processBlockRange(105n, 105n);
+
+    expect(tradesRepo.rows[0]?.side).toBe("SELL");
+    expect(resonanceDetector.events).toHaveLength(0);
+  });
+
+  it("does NOT notify the resonance detector for a wallet absent from the watchlist cache (covers both 'not on the list' and 'enabled=false', since Phase 4's cache only ever holds enabled entries)", async () => {
+    const tokensRepo = fakeTokensRepo([dopplerToken({ poolId: DOPPLER_POOL_ID })]);
+    const tradesRepo = fakeTradesRepo();
+    const httpClient = makeHttpClient({
+      getDopplerSwapLogs: vi.fn(async () => [dopplerSwapLog()]), // BUY, but wallet isn't watched
+    });
+    const resonanceDetector = fakeResonanceDetector();
+
+    const detector = createTradeDetector({
+      chainId: CHAIN_ID,
+      httpClient,
+      tokensRepo,
+      tradesRepo,
+      watchlistCache: fakeWatchlistCache([]),
+      resonanceDetector,
+      logger: fakeLogger(),
+    });
+
+    await detector.processBlockRange(105n, 105n);
+
+    expect(resonanceDetector.events).toHaveLength(0);
   });
 });

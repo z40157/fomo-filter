@@ -84,6 +84,8 @@ function buildApp(walletsRepo: WalletWatchlistRepo, watchlistCache: WatchlistCac
     adminApiKey: ADMIN_KEY,
     countActiveCandidates: () => 0,
     getDexScreenerStatus: () => "ok",
+    countSignalsToday: async () => 0,
+    getLastSignalAt: async () => null,
   });
 }
 

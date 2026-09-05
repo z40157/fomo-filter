@@ -3,6 +3,7 @@ import type { Logger } from "../logger.js";
 import type { NewTrade, TradeSide, TradesRepo } from "../db/trades.js";
 import type { TokensRepo, TrackedToken } from "../db/tokens.js";
 import type { WatchlistCache } from "../watchlist/watchlistCache.js";
+import type { ResonanceDetector } from "../signals/resonanceDetector.js";
 import type { HttpClient } from "./client.js";
 import { chunkBlockRange } from "./newTokenDetector.js";
 
@@ -224,6 +225,7 @@ export interface TradeDetectorDeps {
   tokensRepo: TokensRepo;
   tradesRepo: TradesRepo;
   watchlistCache: WatchlistCache;
+  resonanceDetector: ResonanceDetector;
   logger: Logger;
   /** Max block span per getLogs call. Default 10,000 (QuickNode Build plan's limit for this chain). */
   maxLogsBlockRange?: bigint;
@@ -342,6 +344,17 @@ export function createTradeDetector(deps: TradeDetectorDeps): TradeDetector {
             },
             "watchlist wallet trade",
           );
+
+          if (params.side === "BUY") {
+            await deps.resonanceDetector.onWatchlistBuy({
+              tokenId: params.token.id,
+              tokenAddress: params.token.address,
+              tokenSymbol: params.token.symbol,
+              wallet: watched,
+              quoteAmount: BigInt(trade.quoteAmount),
+              timestamp: trade.timestamp,
+            });
+          }
         }
       } else {
         deps.logger.debug(

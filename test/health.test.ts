@@ -25,7 +25,7 @@ function fakeWatchlistCache(watchedWallets: number): WatchlistCache {
 }
 
 describe("GET /health", () => {
-  it("returns 200 with real watcher/database/tokens/wallets/candidate status", async () => {
+  it("returns 200 with real watcher/database/tokens/wallets/candidate/signal status", async () => {
     const app = buildServer({
       logger: createLogger("silent"),
       chainId: 4663,
@@ -37,6 +37,8 @@ describe("GET /health", () => {
       adminApiKey: "test-admin-key",
       countActiveCandidates: () => 12,
       getDexScreenerStatus: () => "ok",
+      countSignalsToday: async () => 5,
+      getLastSignalAt: async () => new Date("2026-01-01T00:00:00.000Z"),
     });
 
     const response = await app.inject({ method: "GET", url: "/health" });
@@ -52,12 +54,14 @@ describe("GET /health", () => {
       watchedWallets: 3,
       activeCandidates: 12,
       dexscreenerStatus: "ok",
+      signalsToday: 5,
+      lastSignalAt: "2026-01-01T00:00:00.000Z",
     });
 
     await app.close();
   });
 
-  it("reports database errors and a null lastBlock before the first block", async () => {
+  it("reports database errors, a null lastBlock, and no signals yet", async () => {
     const app = buildServer({
       logger: createLogger("silent"),
       chainId: 4663,
@@ -69,6 +73,8 @@ describe("GET /health", () => {
       adminApiKey: "test-admin-key",
       countActiveCandidates: () => 0,
       getDexScreenerStatus: () => "down",
+      countSignalsToday: async () => 0,
+      getLastSignalAt: async () => null,
     });
 
     const response = await app.inject({ method: "GET", url: "/health" });
@@ -83,6 +89,8 @@ describe("GET /health", () => {
       watchedWallets: 0,
       activeCandidates: 0,
       dexscreenerStatus: "down",
+      signalsToday: 0,
+      lastSignalAt: null,
     });
 
     await app.close();

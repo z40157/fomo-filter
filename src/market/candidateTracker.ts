@@ -31,6 +31,12 @@ export interface CandidateAggregateState {
   computedAt: Date;
 }
 
+export interface LatestMarketSnapshot {
+  marketCap: number | null;
+  liquidity: number | null;
+  volume5m: number | null;
+}
+
 export interface CandidateTrackerDeps {
   tokensRepo: TokensRepo;
   tradesRepo: TradesRepo;
@@ -48,12 +54,15 @@ export interface CandidateTracker {
   stop(): void;
   getActiveCandidateCount(): number;
   getAggregateState(tokenId: number): CandidateAggregateState | undefined;
+  /** The most recent DexScreener market data seen for this token, if any — for signals/resonanceDetector.ts to attach to a triggered signal. */
+  getLatestMarketSnapshot(tokenId: number): LatestMarketSnapshot | undefined;
 }
 
 export function createCandidateTracker(deps: CandidateTrackerDeps): CandidateTracker {
   const config: TrackerConfig = { ...DEFAULT_TRACKER_CONFIG, ...deps.config };
   const candidates = new Map<number, CandidateState>();
   const aggregateState = new Map<number, CandidateAggregateState>();
+  const latestMarketSnapshots = new Map<number, LatestMarketSnapshot>();
   let timer: ReturnType<typeof setInterval> | null = null;
 
   async function discoverNewCandidates(): Promise<void> {
@@ -97,6 +106,11 @@ export function createCandidateTracker(deps: CandidateTrackerDeps): CandidateTra
         sells5m: snapshot.sells5m,
         snapshotAt: now,
       });
+      latestMarketSnapshots.set(candidate.tokenId, {
+        marketCap: snapshot.marketCap,
+        liquidity: snapshot.liquidityUsd,
+        volume5m: snapshot.volume5m,
+      });
     } else {
       deps.logger.debug({ token: candidate.address }, "no DexScreener data yet — skipping snapshot write");
     }
@@ -135,6 +149,7 @@ export function createCandidateTracker(deps: CandidateTrackerDeps): CandidateTra
       if (shouldExitTracking(candidate, now, config)) {
         candidates.delete(tokenId);
         aggregateState.delete(tokenId);
+        latestMarketSnapshots.delete(tokenId);
         deps.logger.info(
           { token: candidate.address },
           "candidate exited tracking (past minimum duration with no recent activity)",
@@ -167,6 +182,10 @@ export function createCandidateTracker(deps: CandidateTrackerDeps): CandidateTra
 
     getAggregateState(tokenId) {
       return aggregateState.get(tokenId);
+    },
+
+    getLatestMarketSnapshot(tokenId) {
+      return latestMarketSnapshots.get(tokenId);
     },
   };
 }

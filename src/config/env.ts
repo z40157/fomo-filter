@@ -25,6 +25,10 @@ const envSchema = z.object({
   CANDIDATE_INACTIVE_REFRESH_MS: z.coerce.number().int().positive().optional(),
   CANDIDATE_MIN_TRACKING_HOURS: z.coerce.number().positive().optional(),
   CANDIDATE_EXIT_INACTIVITY_HOURS: z.coerce.number().positive().optional(),
+  // KOL resonance detection tuning — optional, defaults live in
+  // signals/resonanceLogic.ts's DEFAULT_RESONANCE_CONFIG.
+  RESONANCE_WINDOW_MINUTES: z.coerce.number().positive().optional(),
+  RESONANCE_COOLDOWN_MINUTES: z.coerce.number().positive().optional(),
   LOG_LEVEL: z
     .enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"])
     .default("info"),
