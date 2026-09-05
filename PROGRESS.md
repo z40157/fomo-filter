@@ -6,7 +6,7 @@ and their BUY/SELL trading activity as a data source for a future
 FOMO-detection/alerting system. This file exists so a new session (or a
 human) can get oriented without re-deriving everything from the code.
 
-## Status: Phase 5 complete (2026-09-05)
+## Status: Phase 6 complete (2026-09-05)
 
 - ✅ Phase 0 — Skeleton
 - ✅ Phase 1 — Chain watcher (WS + reconnect + restart recovery)
@@ -16,12 +16,13 @@ human) can get oriented without re-deriving everything from the code.
 - ✅ Wallet-mining tool (one-off, not a phase) — `scripts/mineWallets.ts` /
   `scripts/verifyWallets.ts`, see its own section below
 - ✅ Phase 5 — DexScreener integration + real-time candidate tracking
-- ⬜ Phase 6 — KOL resonance/co-buy detection (not started; explicitly deferred by the project owner)
-- ⬜ Everything else — `signals`, `signalWallets`, `alerts`,
-  `signalOutcomes`, `narrativeFlags` tables are still placeholder-only (just
-  `id`/`createdAt`).
+- ✅ Phase 6 — KOL resonance detection (trigger + persist only — no scoring or alerting yet)
+- ⬜ Phase 7 — Scoring (not started; explicitly deferred by the project owner)
+- ⬜ Phase 8 — Alerting (not started)
+- ⬜ Everything else — `alerts`, `signalOutcomes`, `narrativeFlags` tables
+  are still placeholder-only (just `id`/`createdAt`).
 
-Tests: 97/97 passing (`npm test`). Typecheck clean (`npm run typecheck` and
+Tests: 129/129 passing (`npm test`). Typecheck clean (`npm run typecheck` and
 `npm run typecheck:test`). `npm run build` clean.
 
 ---
@@ -216,6 +217,85 @@ Phase 3's `trades.usd_value` (left null since there was no price source).
   on start, held steady at 165 the whole run, kept `dexscreenerStatus:
   "ok"` throughout, and wrote 51 real snapshot rows across 25+ distinct
   tokens with sane price/liquidity values.
+
+### Phase 6 — KOL resonance detection (`src/signals/`)
+The system's first move from *recording* data to *flagging* it. This
+phase is detection-and-persistence only — no scoring (Phase 7) and no
+alerting (Phase 8). Every log line and code comment is deliberately
+worded as a detection trigger for review, never a buy recommendation.
+
+- **Detection is event-driven, not polled.** `resonanceDetector.ts`'s
+  `onWatchlistBuy()` is called directly from `chain/tradeDetector.ts`'s
+  `recordTrade()` on every watchlist wallet's BUY (right next to the
+  existing "watchlist wallet trade" hit log) — never a periodic full-table
+  scan, so a signal can't be missed by a scan interval landing outside the
+  window.
+- **Three independent trigger conditions** (`resonanceLogic.ts`'s
+  `evaluateConditions`), all counted by distinct `ownerGroup` — reusing
+  Phase 4's `countDistinctOwnerGroups`, never raw address count, for the
+  same reason Phase 4 introduced `ownerGroup` in the first place (one
+  person's 5 wallets must not look like 5 independent signals):
+  - **A**: >= 3 distinct ownerGroups bought the token within the window.
+  - **B**: >= 2 distinct **Tier-A** ownerGroups bought within the window.
+  - **C**: >= 2 distinct ownerGroups bought, **and** at least one of them
+    bought 2+ times within the window (checked at the ownerGroup level —
+    two different addresses from the same owner both buying counts as a
+    repeat).
+  - A window can satisfy more than one condition at once; `signals
+    .trigger_conditions` is an array, not a single value.
+  - A watchlist wallet with a blank `ownerGroup` becomes its own
+    independent group (not silently dropped) — logged as a `warn` so it
+    can be fixed later: `"watchlist wallet has no ownerGroup set..."`.
+- **Sliding window**: default 20 minutes (`RESONANCE_WINDOW_MINUTES`),
+  pruned lazily on every `onWatchlistBuy` call for the token in question,
+  plus a periodic sweep (`cleanupIntervalMs`, default 60s) that prunes —
+  and fully removes the map entry for — every tracked token, so a token
+  that stops getting watchlist buys doesn't leak its stale window forever.
+- **Cooldown + escalation** (`decideTrigger`): once a signal fires for a
+  token, no new signal for that token for `RESONANCE_COOLDOWN_MINUTES`
+  (default 10) — *unless* the window gets strictly stronger than it was at
+  the last signal: distinct ownerGroups up by 2+, or a Tier-A ownerGroup
+  appearing for the first time. Either one breaks through the cooldown and
+  fires immediately, marked `escalation: true`; the cooldown timer then
+  restarts from that escalation. A subtlety confirmed by the real replay
+  below: since every buy is checked immediately (not batched), an
+  escalation fires the instant the threshold is first crossed — e.g. going
+  from baseline 3 to 5 ownerGroups escalates the moment the 5th one buys,
+  not "whenever you next check."
+- `signals`/`signal_wallets` schema completed. `signals` carries
+  `trigger_conditions` (enum array), `distinct_owner_groups`,
+  `tier_a_count`, `has_repeat_accumulation`, the `window_minutes` actually
+  used (so an old signal can always be re-interpreted correctly even after
+  the config changes), `escalation`, and a market snapshot
+  (`market_cap`/`liquidity`/`volume_5m`) pulled from a new
+  `candidateTracker.getLatestMarketSnapshot()` — null if none was
+  available yet, never guessed. `signal_wallets` has one row per
+  participating wallet: name/tier/ownerGroup plus that wallet's
+  window-scoped `buy_count`/`buy_amount` (raw quote-currency units, same
+  convention as `trades.quote_amount` — comparable across wallets within
+  one signal, not across signals with different quote currencies).
+- `GET /health` gains `signalsToday` and `lastSignalAt`.
+- **Real verification — MOLLIE historical replay**: since the watchlist
+  only had Phase 4's 3 test wallets (unlikely to organically resonate),
+  verified against real data instead: temporarily added 5 real early
+  MOLLIE buyers (from Phase 3's actual trade data) to the watchlist with
+  distinct `ownerGroup`s (2 marked Tier A), then replayed their 30 real
+  historical BUY trades through the real detector in their actual
+  on-chain chronological order. It fired 4 real signals:
+
+  | # | triggered at (real) | conditions | ownerGroups | Tier-A | repeat | escalation |
+  |---|---|---|---|---|---|---|
+  | 1 | 07:32:49 | B | 2 | 2 | false | false |
+  | 2 | 07:32:56 | A, B | 4 | 2 | false | **true** (broke a 10-min cooldown: +2 ownerGroups) |
+  | 3 | 07:47:00 | A, B, C | 5 | 2 | true | false (cooldown from #2 had elapsed) |
+  | 4 | 08:02:13 | A, B, C | 3 | 2 | true | false (cooldown from #3 had elapsed) |
+
+  All 4 rows and their `signal_wallets` breakdowns are real rows in the
+  dev database. The 5 temporary wallets (`ReplayTest_1..5`,
+  `replay_owner_1..5`) are left in `wallet_watchlist` with
+  **`enabled: false`** (not deleted) and a `notes` field stating they were
+  only for this verification — **they are not a real curated list**;
+  don't mistake them for genuine KOLs if you're browsing the table.
 
 ---
 
@@ -533,9 +613,8 @@ amount exactly).
   by an order of magnitude.
 
 ## Next planned phase
-Phase 6 — KOL resonance/co-buy detection (not yet started as of
-2026-09-05; requirements to be provided by the project owner). It will
-consume `countDistinctOwnerGroups` (from `src/watchlist/watchlistCache.ts`,
-written in Phase 4) and the per-candidate aggregate state
-(`independentOwnerCount`, `watchedWalletBuyCount`, etc.) that Phase 5's
-`candidateTracker.ts` already maintains in memory.
+Phase 7 — Importance scoring + risk grading (in progress as of
+2026-09-05). Phase 9's planned Outcome Tracker will need Phase 7's exact
+scoring rules to be traceable after the fact — see Phase 7's section
+above once it lands for the full rule definitions, kept versioned there
+for that reason.
