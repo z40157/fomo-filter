@@ -6,19 +6,22 @@ and their BUY/SELL trading activity as a data source for a future
 FOMO-detection/alerting system. This file exists so a new session (or a
 human) can get oriented without re-deriving everything from the code.
 
-## Status: Phase 4 complete (2026-09-05)
+## Status: Phase 5 complete (2026-09-05)
 
 - ✅ Phase 0 — Skeleton
 - ✅ Phase 1 — Chain watcher (WS + reconnect + restart recovery)
 - ✅ Phase 2 — New-token discovery (Doppler + Pons V1)
 - ✅ Phase 3 — BUY/SELL trade detection (Doppler + Pons V1)
 - ✅ Phase 4 — Wallet watchlist (manually curated, admin API + import + trade-time matching)
-- ⬜ Phase 5 — DexScreener integration (not started; explicitly deferred by the project owner)
-- ⬜ Everything else — `tokenSnapshots`, `signals`, `signalWallets`, `alerts`,
+- ✅ Wallet-mining tool (one-off, not a phase) — `scripts/mineWallets.ts` /
+  `scripts/verifyWallets.ts`, see its own section below
+- ✅ Phase 5 — DexScreener integration + real-time candidate tracking
+- ⬜ Phase 6 — KOL resonance/co-buy detection (not started; explicitly deferred by the project owner)
+- ⬜ Everything else — `signals`, `signalWallets`, `alerts`,
   `signalOutcomes`, `narrativeFlags` tables are still placeholder-only (just
   `id`/`createdAt`).
 
-Tests: 54/54 passing (`npm test`). Typecheck clean (`npm run typecheck` and
+Tests: 97/97 passing (`npm test`). Typecheck clean (`npm run typecheck` and
 `npm run typecheck:test`). `npm run build` clean.
 
 ---
@@ -112,12 +115,107 @@ list at trade-recording time.
   also on a 60s timer in `index.ts` — the timer exists specifically to
   pick up `wallets:import` runs (a separate process the live server has
   no other way to hear about).
-- `countDistinctOwnerGroups` (`watchlistCache.ts`) is written and tested
-  now, used by nothing yet — it's what Phase 5's resonance/co-buy
-  detection will need to avoid counting one person's 5 wallets as 5
-  independent KOLs.
+- `countDistinctOwnerGroups` (`watchlistCache.ts`) was written and tested
+  in Phase 4 with no consumer yet; Phase 5's `candidateAggregates.ts` is
+  its first real user (`independentOwnerCount`). Phase 6's resonance/co-buy
+  detection will lean on it more directly.
 - `GET /health` gains `watchedWallets` (`watchlistCache.size()` — no DB
   query).
+
+### Wallet-mining tool (`scripts/mineWallets.ts`, `scripts/verifyWallets.ts`) — one-off, not a phase
+Robinhood Chain is too new for any existing smart-money leaderboard (GMGN
+etc.) to cover it, so candidate KOL/smart-money addresses have to be mined
+from our own data instead of looked up. This is a standalone analysis tool,
+not part of the phase pipeline — it never writes to the live
+`wallet_watchlist` table.
+
+- `npm run wallets:mine`: scores tokens from existing trade data (trade
+  count, unique buyers, buy ratio, activity duration, net quote-currency
+  inflow) via rank-normalization across the token set (`scripts/lib/
+  mining.ts`, unit-tested) — explicitly a proxy for "looks active," not a
+  real gain/market-cap ranking, since no pricing existed yet when this was
+  built. Mines early-buyer wallets from the top-scoring tokens (both a
+  "first N trades" and a "first X minutes" criterion, tracked separately),
+  excludes known deployer/protocol/pool/contract addresses (`eth_getCode`,
+  with retry — a burst of concurrent calls got 429'd at first, fixed by
+  lowering concurrency and retrying with backoff, excluding on persistent
+  failure rather than assuming EOA), and writes `data/mined_wallets.json` —
+  same shape `wallets:import` expects, but every entry starts
+  `enabled: false` pending human review.
+- `npm run wallets:verify`: enriches those candidates with real Mobula
+  "Wallet Trading Analysis" data for chainId `evm:4663` (`scripts/lib/
+  mobula.ts`) — chain id and the `Authorization: <key>` header format were
+  confirmed against Mobula's own docs/live API, not assumed. Falls back to
+  Mobula's public demo API (no key needed) when `MOBULA_API_KEY` isn't set.
+  Rate-limited to Mobula's documented 5/min, with retry/backoff and a
+  `data/mobula_cache.json` cache so repeat runs don't re-spend quota.
+  Missing data is marked `"unknown"`, never 0.
+- Real run: 50 candidates mined, all 50 Mobula-verified successfully.
+  **Anomaly worth knowing about**: Mobula's demo API's `period` parameter
+  (7d/30d/90d) returned byte-identical results in testing — it did not
+  appear to actually filter by time window. Also, `periodActiveTokensCount`
+  for the top candidate came back as 692, far exceeding our own tracked
+  universe of 165 tokens, suggesting either broader chain-wide coverage by
+  Mobula (plausible — plenty of activity happens outside Doppler/Pons) or
+  demo-tier data that isn't fully reliable. Get a real `MOBULA_API_KEY`
+  and re-verify before trusting these PnL numbers for anything real.
+- `data/mined_wallets.json` and `data/mobula_cache.json` are gitignored —
+  same treatment as `data/wallets.json`: real derived data, not source.
+
+### Phase 5 — DexScreener integration + real-time candidate tracking (`src/market/`)
+The only external market-data source in V1. Goal: know every tracked
+token's market cap, liquidity, and volume, and start closing the loop on
+Phase 3's `trades.usd_value` (left null since there was no price source).
+
+- `src/market/dexscreener.ts`: chain id `"robinhood"` — confirmed live
+  (DexScreener's own docs never show Robinhood Chain's identifier) by
+  querying `/latest/dex/search` with a real BUNEE address and getting back
+  `"chainId":"robinhood"` with a pair address matching what Phase 3 already
+  found independently on-chain. Uses `GET /tokens/v1/{chainId}/
+  {tokenAddress}`, which docs.dexscreener.com/api/reference.md documents
+  (along with every other listed endpoint) at a flat 60 requests/minute,
+  no API key needed. The client self-limits to 50/min for headroom, caches
+  both hits and misses in memory (15s TTL), retries with
+  `chain/backoff.ts`'s `ExponentialBackoff` (reused, not reimplemented) on
+  429/5xx/network errors, times out via `AbortController`, and tracks a
+  rolling ok/degraded/down status from real call outcomes (a "not found"
+  response doesn't count as a failure — it's a valid answer). A token with
+  no indexed pair yet returns `null`, never a fabricated `0`.
+- `src/market/candidateTrackerLogic.ts`: pure, timer-free scheduling
+  decisions (unit-tested directly, no mocked clock/timers needed beyond an
+  injected `now`) — `isActive`, `refreshIntervalMs`, `isDueForRefresh`,
+  `shouldExitTracking`. Defaults: every Phase 2 token tracked at least 24h
+  regardless of activity; active (traded within 15min) refreshes every
+  20s; inactive refreshes every 5min; exits only after the 24h floor once
+  it's had no trade for 4h. All four numbers are overridable via
+  `CANDIDATE_ACTIVE_REFRESH_MS` / `CANDIDATE_INACTIVE_REFRESH_MS` /
+  `CANDIDATE_MIN_TRACKING_HOURS` / `CANDIDATE_EXIT_INACTIVITY_HOURS`.
+- `src/market/candidateTracker.ts`: wires the above to real DexScreener
+  calls, `token_snapshots` writes, and per-candidate in-memory aggregate
+  state (`src/market/candidateAggregates.ts`): `ageMs`,
+  `watchedWalletBuyCount`, `independentOwnerCount` (via Phase 4's
+  `countDistinctOwnerGroups`, scoped to BUY-side watchlist wallets),
+  `aggregateWatchedBuyUsd`/`SellUsd` (sums `trades.usd_value` — see the
+  enrichment caveat below), and `repeatBuyerCount` (wallets with 2+ buys
+  on the token — deliberately **not** scoped to the watchlist; it's a
+  general momentum signal, same "reentry" concept `mineWallets.ts` already
+  used).
+- `src/market/usdEnrichment.ts`: see "USD enrichment design" below.
+- `token_snapshots` schema completed: `token_id → tokens`, `price`
+  (numeric(38,18) — meme-coin prices go well below $0.0001), `market_cap`,
+  `liquidity`, `volume_5m`, `volume_1h`, `buys_5m`, `sells_5m`,
+  `snapshot_at`, with a `(token_id, snapshot_at)` index for time-series
+  reads. See "token_snapshots growth" below for volume/cleanup notes.
+- `GET /health` gains `activeCandidates` (`candidateTracker
+  .getActiveCandidateCount()`) and `dexscreenerStatus`
+  (`dexscreener.getStatus()`).
+- Real verification: pulled live data for SEXCOIN ($24,602 mcap, $24,787.76
+  liquidity), MOLLIE ($25,731 mcap, $25,658.25 liquidity), and BUNEE
+  ($21,052 mcap, $13,464.02 liquidity) — all real, sane numbers. A live 90s
+  `CandidateTracker` run discovered all 165 real tracked tokens immediately
+  on start, held steady at 165 the whole run, kept `dexscreenerStatus:
+  "ok"` throughout, and wrote 51 real snapshot rows across 25+ distinct
+  tokens with sane price/liquidity values.
 
 ---
 
@@ -241,6 +339,78 @@ process alive), on top of the immediate refresh after every `POST`/
 expect up to ~60s of lag before its trades start producing hit logs —
 this is a known, accepted trade-off, not a bug.
 
+### 8. USD enrichment design: never a future price for a past trade, and it needs the tracker to have run for a while first
+`trades.usd_value` has been null since Phase 3 (no price source existed
+yet). `src/market/usdEnrichment.ts` backfills it, but under one hard rule:
+**it only ever uses a `token_snapshots` row whose `snapshot_at` is at or
+before the trade's own `timestamp`**, within a bounded staleness window
+(`maxSnapshotAgeMs`, default 10 minutes). Never the current/latest price,
+never a snapshot from after the trade. Using a later price to value an
+earlier trade wouldn't be recovering history, it'd be fabricating it —
+meme-coin prices can move 10x+ within a single 10-minute window on this
+chain, so the two are not close enough to treat as interchangeable.
+
+**Consequence verified directly**: right after Phase 5 shipped, running
+the enrichment job found real, already-recorded historical trades but
+**enriched zero of them** — every snapshot in the table at that point had
+just been written (`snapshot_at` = now), which is *after* every historical
+trade, so none qualified. This is correct, not broken. `usd_value` only
+starts filling in once `candidateTracker.ts` has been running continuously
+long enough to have a snapshot within `maxSnapshotAgeMs` of a trade's
+actual time — i.e., enrichment coverage grows gradually from whenever the
+tracker was first started, not retroactively. A large gap between "Phase 3
+trades exist" and "the tracker has been live" means a permanent gap in
+`usd_value` coverage for that period; there's no way to backfill it after
+the fact since DexScreener doesn't expose historical prices through this
+endpoint. If dense historical `usd_value` coverage is ever needed for
+old trades, that requires a different data source (DexScreener's OHLCV/
+candle endpoints, if they cover this chain) — out of scope for V1.
+
+Decimals for the human-unit conversion come from a live `decimals()`
+call (`chain/erc20.ts`'s `resolveTokenDecimals`), cached per-process —
+never assumed as 18, since that would silently corrupt `usd_value` by
+whatever power-of-10 the real token's decimals differ by, with no error
+to catch it.
+
+### 9. `token_snapshots` growth rate and cleanup strategy (not implemented in V1)
+Every tracked candidate gets a row on every refresh: ~20s cadence while
+active (15min after its last trade), ~5min once inactive, for a minimum
+of 24h per token before it can exit tracking at all.
+
+**Rough estimate**, worst case (a token stays "active" — i.e. keeps
+trading — for its whole first 24h, which real tokens on this chain
+regularly do): 24h × 3,600s / 20s ≈ **~4,320 rows per active-for-a-full-day
+token**. A quieter token that goes inactive quickly costs far less: e.g.
+active for 1h then inactive for the remaining 23h ≈ 180 + 23×12 ≈ **~456
+rows**. With Doppler/Pons launch volume observed so far (roughly
+tens-to-a-few-hundred new tokens per day during a busy period — see
+Phase 2/3 real-verification numbers, 165 tokens accumulated so far), a
+busy day could plausibly add **tens of thousands of `token_snapshots`
+rows per day**, growing roughly linearly with (new tokens/day ×
+average rows/token) — i.e. this table is the fastest-growing one in the
+schema by a wide margin, and will keep growing indefinitely since V1
+implements no retention policy.
+
+**Not implemented, deliberately deferred** (per the project owner's
+instruction to only document the plan, not build it):
+- **Downsample old data**: once a token exits tracking (or after some
+  age, e.g. 7 days), collapse its snapshot history to a coarser
+  resolution (e.g. one row per hour instead of per 20s) rather than
+  deleting it outright — preserves the shape of a token's price history
+  for later analysis at a fraction of the storage.
+- **Hard retention window**: delete snapshot rows older than N days
+  (e.g. 30/90) for tokens that are no longer being tracked, on a
+  scheduled job — simplest option, loses fine-grained history entirely
+  past the window.
+- **Partition by time** (e.g. Postgres native partitioning on
+  `snapshot_at`) if the table gets large enough that even indexed
+  queries or the eventual cleanup job itself become slow — makes bulk
+  drops of old partitions cheap regardless of which retention policy is
+  chosen above.
+- Whichever is chosen, the existing `(token_id, snapshot_at)` index
+  already supports the query shapes a cleanup job would need (per-token
+  time-range scans), so no schema rework is required to add this later.
+
 ---
 
 ## Confirmed contract addresses (chainId 4663) and their source
@@ -252,6 +422,8 @@ this is a known, accepted trade-off, not a bug.
 | `0x4e3468951D49f2EEa976eD0D6e75fFCb44a9a544` | Doppler pool-initializer/hook (shared singleton, so far) | Read per-token from the real `Create` event's `initializer` field — **not hardcoded anywhere in the code**, this is just what's been observed on every real launch to date |
 | Per-token `pool` address | Pons V1's dedicated Uniswap V3 pool per launch | Real `TokenLaunched` event's `pool` field |
 | `0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73` | Common Pons V1 pair token (looks like WETH) | Observed as `pairToken` on many real Pons launches (e.g. BUNEE) — not independently confirmed as canonical WETH, just the token every sampled Pons pool paired against |
+| `"robinhood"` | Robinhood Chain's identifier in DexScreener's API (`{chainId}` path segment) | Not shown anywhere in docs.dexscreener.com — found by querying `/latest/dex/search?q=<real BUNEE address>` and reading `chainId` back off the real response, which also returned the exact pair address Phase 3 already knew independently |
+| `"evm:4663"` | Robinhood Chain's identifier in Mobula's API (`chainIds` param) | Not shown in Mobula's docs either — found the same way, via a real `/wallet/analysis` call, confirmed by the response's `nativeBalance.chainId` field |
 
 Reference repos cloned and inspected directly during verification (not
 guessed from memory):
@@ -285,9 +457,11 @@ amount exactly).
   migrate` any time a placeholder table gets its real columns for the
   first time.
 
-- **`usd_value` is always `null` for now** — no pricing pass exists yet.
-  This was explicit in the Phase 3 spec ("save raw quote amount, don't
-  block on USD conversion").
+- **`usd_value` fills in gradually, not retroactively** — Phase 5's
+  enrichment job only uses a snapshot at-or-before a trade's own timestamp
+  (see decision #8 above), so trades from before the candidate tracker was
+  first running will likely never get a `usd_value` — there's no
+  historical-price endpoint being used to backfill that gap.
 - **`quote_amount`/`token_amount` are raw on-chain base-unit integers**
   (e.g. wei), not decimal-adjusted by each token's `decimals()`. Any
   future consumer computing human-readable amounts needs to fetch
@@ -338,11 +512,30 @@ amount exactly).
   gitignored** — same treatment as `.env`. Only `data/wallets.example.json`
   is tracked. Anyone picking up this repo fresh needs to create their own
   `data/wallets.json` (or use the admin API) before `wallets:import` has
-  anything to do.
+  anything to do. Same treatment for `data/mined_wallets.json` and
+  `data/mobula_cache.json` from the wallet-mining tool.
+- **`token_snapshots` has no retention/cleanup implemented** — see
+  decision #9 above for the growth estimate and the options considered
+  (downsampling, hard retention window, time partitioning). Deliberately
+  left as documentation-only for V1.
+- **Mobula's demo-tier `period` parameter didn't appear to filter by time
+  window** in testing (7d/30d/90d gave identical results) — see the
+  wallet-mining tool section above. Don't trust demo-tier Mobula PnL
+  figures without re-verifying against a real `MOBULA_API_KEY`.
+- **`candidateTracker.ts` re-fetches `ModifyLiquidity`-style "is this
+  candidate still active" checks and DexScreener snapshots for every
+  tracked token on every tick where it's due** — at 165 tokens this is
+  fine (verified: stable, `dexscreenerStatus: "ok"` throughout a live 90s
+  run), but the discovery query (`tokensRepo.listAll()`) and the
+  last-trade-time query both scale linearly with total tracked token
+  count, checked every `tickIntervalMs` (default 5s) regardless of how
+  many are actually due. Worth revisiting if the tracked-token count grows
+  by an order of magnitude.
 
 ## Next planned phase
-Phase 5 — DexScreener integration (not yet started as of 2026-09-05;
-requirements to be provided by the project owner). The project owner has
-also flagged that Phase 5's resonance/co-buy detection will consume
-`countDistinctOwnerGroups` from `src/watchlist/watchlistCache.ts`, already
-written and tested in Phase 4.
+Phase 6 — KOL resonance/co-buy detection (not yet started as of
+2026-09-05; requirements to be provided by the project owner). It will
+consume `countDistinctOwnerGroups` (from `src/watchlist/watchlistCache.ts`,
+written in Phase 4) and the per-candidate aggregate state
+(`independentOwnerCount`, `watchedWalletBuyCount`, etc.) that Phase 5's
+`candidateTracker.ts` already maintains in memory.
