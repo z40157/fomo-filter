@@ -43,6 +43,13 @@
       "when": 1788611084839,
       "tag": "0005_long_mikhail_rasputin",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1788613755113,
+      "tag": "0006_black_baron_zemo",
+      "breakpoints": true
     }
   ]
 }

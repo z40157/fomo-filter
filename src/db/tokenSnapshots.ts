@@ -14,6 +14,11 @@ export interface NewTokenSnapshot {
   snapshotAt: Date;
 }
 
+export interface RecentSnapshot {
+  snapshotAt: Date;
+  volume5m: number | null;
+}
+
 export interface TokenSnapshotsRepo {
   insert(snapshot: NewTokenSnapshot): Promise<void>;
   /**
@@ -24,6 +29,8 @@ export interface TokenSnapshotsRepo {
    * recovering it.
    */
   findNearestPriceBefore(tokenId: number, at: Date, maxAgeMs: number): Promise<{ price: number } | null>;
+  /** The `limit` most recent snapshots for a token, oldest first — for scoring.ts's Acceleration trend calculation. */
+  listRecent(tokenId: number, limit: number): Promise<RecentSnapshot[]>;
 }
 
 export function createTokenSnapshotsRepo(db: Database): TokenSnapshotsRepo {
@@ -61,6 +68,19 @@ export function createTokenSnapshotsRepo(db: Database): TokenSnapshotsRepo {
       const row = rows[0];
       if (!row || row.price === null) return null;
       return { price: Number(row.price) };
+    },
+
+    async listRecent(tokenId, limit) {
+      const rows = await db
+        .select({ snapshotAt: tokenSnapshots.snapshotAt, volume5m: tokenSnapshots.volume5m })
+        .from(tokenSnapshots)
+        .where(eq(tokenSnapshots.tokenId, tokenId))
+        .orderBy(desc(tokenSnapshots.snapshotAt))
+        .limit(limit);
+
+      return rows
+        .map((r) => ({ snapshotAt: r.snapshotAt, volume5m: r.volume5m === null ? null : Number(r.volume5m) }))
+        .reverse(); // oldest first, matching scoreAcceleration's expectation
     },
   };
 }

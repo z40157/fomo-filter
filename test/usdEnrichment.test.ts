@@ -21,6 +21,9 @@ function fakeTradesRepo(pending: PendingUsdValueTrade[]): TradesRepo & { updates
     listByTokenAndWallets: async () => [],
     countBuysByWallet: async () => new Map(),
     lastTradeAtByToken: async () => new Map(),
+    countTotalBuysSells: async () => ({ buys: 0, sells: 0 }),
+    hasWalletSold: async () => false,
+    getLargestSellUsdSince: async () => null,
   };
 }
 
@@ -46,6 +49,7 @@ describe("usdEnrichment — uses the nearest historical snapshot, not the curren
     const snapshotsRepo: TokenSnapshotsRepo = {
       insert: async () => {},
       findNearestPriceBefore,
+      listRecent: async () => [],
     };
 
     const job = createUsdEnrichmentJob({
@@ -70,6 +74,7 @@ describe("usdEnrichment — uses the nearest historical snapshot, not the curren
     const snapshotsRepo: TokenSnapshotsRepo = {
       insert: async () => {},
       findNearestPriceBefore: async () => null, // nothing close enough
+      listRecent: async () => [],
     };
 
     const job = createUsdEnrichmentJob({
@@ -94,6 +99,7 @@ describe("usdEnrichment — uses the nearest historical snapshot, not the curren
     const snapshotsRepo: TokenSnapshotsRepo = {
       insert: async () => {},
       findNearestPriceBefore: async () => ({ price: 1 }),
+      listRecent: async () => [],
     };
 
     const job = createUsdEnrichmentJob({
@@ -118,6 +124,7 @@ describe("usdEnrichment — uses the nearest historical snapshot, not the curren
     const snapshotsRepo: TokenSnapshotsRepo = {
       insert: async () => {},
       findNearestPriceBefore: async () => ({ price: 1 }),
+      listRecent: async () => [],
     };
     const resolveDecimals = vi.fn(async () => 18);
 

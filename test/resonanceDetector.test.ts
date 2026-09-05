@@ -53,6 +53,9 @@ function buyEvent(overrides: Partial<WatchlistBuyEvent> = {}): WatchlistBuyEvent
     tokenId: 1,
     tokenAddress: "0xTOKEN",
     tokenSymbol: "TEST",
+    tokenPairToken: "0xPAIR",
+    tokenDeployer: "0xDEPLOYER",
+    tokenLaunchTime: new Date(FIXED_NOW.getTime() - 60 * 60_000), // 1h before FIXED_NOW by default
     wallet: walletEntry(),
     quoteAmount: 100n,
     timestamp: FIXED_NOW,
@@ -117,7 +120,7 @@ describe("ResonanceDetector — persistence shape", () => {
 describe("ResonanceDetector — market snapshot attachment", () => {
   it("attaches the market snapshot from getMarketSnapshot when available", async () => {
     const signalsRepo = fakeSignalsRepo();
-    const snapshot: MarketSnapshot = { marketCap: 12345, liquidity: 6789, volume5m: 42 };
+    const snapshot: MarketSnapshot = { marketCap: 12345, liquidity: 6789, volume5m: 42, buys5m: 3, sells5m: 1 };
     const detector = createResonanceDetector({
       signalsRepo,
       logger: fakeLogger(),
@@ -224,6 +227,79 @@ describe("ResonanceDetector — periodic cleanup (memory)", () => {
     await vi.advanceTimersByTimeAsync(1_000);
 
     expect(detector.getWindowEntryCount(42)).toBe(0);
+    detector.stop();
+  });
+});
+
+describe("ResonanceDetector — Phase 7 scoring integration", () => {
+  it("computes and persists importanceScore/riskLevel/confidence using the supplied data providers", async () => {
+    const signalsRepo = fakeSignalsRepo();
+    const snapshot: MarketSnapshot = { marketCap: 20_000, liquidity: 40_000, volume5m: 5_000, buys5m: 8, sells5m: 2 };
+    const detector = createResonanceDetector({
+      signalsRepo,
+      logger: fakeLogger(),
+      now: () => FIXED_NOW,
+      getMarketSnapshot: () => snapshot,
+      getWatchedFlowState: () => ({ aggregateWatchedBuyUsd: 8_000, aggregateWatchedSellUsd: 0, repeatBuyerCount: 1 }),
+      getRecentSnapshots: async () => [
+        { snapshotAt: new Date(FIXED_NOW.getTime() - 60_000), volume5m: 2_000 },
+        { snapshotAt: FIXED_NOW, volume5m: 5_000 },
+      ],
+      getTradeTotals: async () => ({ buys: 20, sells: 4 }),
+      hasDeployerSold: async () => false,
+      getLargestRecentSellUsd: async () => 50,
+      getNarrativeBoost: async () => null,
+      officialStockTokens: new Set(),
+    });
+
+    for (const addr of ["0x1", "0x2", "0x3"]) {
+      await detector.onWatchlistBuy(buyEvent({ wallet: walletEntry({ address: addr, ownerGroup: addr }) }));
+    }
+
+    expect(signalsRepo.signals).toHaveLength(1);
+    const signal = signalsRepo.signals[0]!;
+    expect(typeof signal.importanceScore).toBe("number");
+    expect(signal.importanceScore!).toBeGreaterThanOrEqual(1);
+    expect(signal.importanceScore!).toBeLessThanOrEqual(10);
+    expect(signal.riskLevel).toBe("LOW");
+    expect(["LOW", "MEDIUM", "HIGH"]).toContain(signal.confidence);
+    expect(signal.scoreBreakdown).toBeDefined();
+    expect(signal.riskBreakdown).toBeDefined();
+    expect(signal.confidenceReasons).toBeDefined();
+    detector.stop();
+  });
+
+  it("still computes a full score/risk/confidence with no data providers at all — everything degrades gracefully, nothing crashes", async () => {
+    const signalsRepo = fakeSignalsRepo();
+    const detector = createResonanceDetector({ signalsRepo, logger: fakeLogger(), now: () => FIXED_NOW });
+
+    for (const addr of ["0x1", "0x2", "0x3"]) {
+      await detector.onWatchlistBuy(buyEvent({ wallet: walletEntry({ address: addr, ownerGroup: addr }) }));
+    }
+
+    const signal = signalsRepo.signals[0]!;
+    expect(typeof signal.importanceScore).toBe("number");
+    // No market data at all -> liquidity unknown -> overall risk must be UNKNOWN, never a default LOW.
+    expect(signal.riskLevel).toBe("UNKNOWN");
+    expect(signal.confidence).toBe("LOW");
+    detector.stop();
+  });
+
+  it("logs a human-readable [SIGNAL] summary line alongside the structured log", async () => {
+    const signalsRepo = fakeSignalsRepo();
+    const logger = fakeLogger();
+    const detector = createResonanceDetector({ signalsRepo, logger, now: () => FIXED_NOW });
+
+    for (const addr of ["0x1", "0x2", "0x3"]) {
+      await detector.onWatchlistBuy(buyEvent({ wallet: walletEntry({ address: addr, ownerGroup: addr }) }));
+    }
+
+    const calls = (logger.info as ReturnType<typeof vi.fn>).mock.calls;
+    const summaryCall = calls.find((c) => typeof c[0] === "string" && c[0].startsWith("[SIGNAL]"));
+    expect(summaryCall).toBeDefined();
+    expect(summaryCall![0]).toContain("Risk:");
+    expect(summaryCall![0]).toContain("Confidence:");
+    expect(summaryCall![0]).toContain("Resonance");
     detector.stop();
   });
 });

@@ -1,5 +1,7 @@
 // Ties resonanceLogic.ts's pure math to real state: an in-memory sliding
-// window per token, cooldown tracking, DB persistence, and logging.
+// window per token, cooldown tracking, DB persistence, and logging. Also
+// orchestrates Phase 7 scoring (importance/risk/confidence) once a signal
+// fires — see signals/scoring.ts and signals/risk.ts for the actual rules.
 //
 // Called synchronously from the trade-detection pipeline on every
 // watchlist wallet's BUY (see chain/tradeDetector.ts) — never a polling
@@ -19,19 +21,33 @@ import {
   type ResonanceConfig,
   type WindowEntry,
 } from "./resonanceLogic.js";
+import { computeConfidence, computeImportanceScore, type SnapshotPoint } from "./scoring.js";
+import { computeRisk } from "./risk.js";
 
 const DEFAULT_CLEANUP_INTERVAL_MS = 60_000;
+const RECENT_SNAPSHOTS_FOR_TREND = 5;
 
 export interface MarketSnapshot {
   marketCap: number | null;
   liquidity: number | null;
   volume5m: number | null;
+  buys5m: number | null;
+  sells5m: number | null;
+}
+
+export interface WatchedFlowState {
+  aggregateWatchedBuyUsd: number;
+  aggregateWatchedSellUsd: number;
+  repeatBuyerCount: number;
 }
 
 export interface WatchlistBuyEvent {
   tokenId: number;
   tokenAddress: string;
   tokenSymbol: string | null;
+  tokenPairToken: string;
+  tokenDeployer: string;
+  tokenLaunchTime: Date;
   wallet: WalletEntry;
   /** Raw on-chain integer quote amount for this BUY (already absolute-valued). */
   quoteAmount: bigint;
@@ -42,8 +58,22 @@ export interface ResonanceDetectorDeps {
   signalsRepo: SignalsRepo;
   logger: Logger;
   config?: Partial<ResonanceConfig>;
-  /** Pulls the latest known market data for a token from candidateTracker's in-memory state — undefined/null fields if none is available yet. */
+  /** Pulls the latest known DexScreener data for a token from candidateTracker's in-memory state — undefined if none is available yet. */
   getMarketSnapshot?: (tokenId: number) => MarketSnapshot | undefined;
+  /** Pulls the current watchlist flow aggregate from candidateTracker's in-memory state (Phase 5) — undefined if not computed yet. */
+  getWatchedFlowState?: (tokenId: number) => WatchedFlowState | undefined;
+  /** Oldest-first recent market snapshots, for the Acceleration dimension's trend calculation. */
+  getRecentSnapshots?: (tokenId: number, limit: number) => Promise<SnapshotPoint[]>;
+  /** All-time BUY/SELL counts for the token across all traders. */
+  getTradeTotals?: (tokenId: number) => Promise<{ buys: number; sells: number }>;
+  /** Has this token's deployer ever sold it? Null if undeterminable. */
+  hasDeployerSold?: (tokenId: number, deployer: string) => Promise<boolean | null>;
+  /** Largest single SELL (usd) up to `before`, within `windowMinutes` — null if none qualify. */
+  getLargestRecentSellUsd?: (tokenId: number, before: Date, windowMinutes: number) => Promise<number | null>;
+  /** Latest manually-set narrative boost (0-1) for the token, or null. */
+  getNarrativeBoost?: (tokenId: number) => Promise<number | null>;
+  /** Lowercased official Robinhood stock-token addresses, from config/stockTokens.json. Empty by default. */
+  officialStockTokens?: ReadonlySet<string>;
   now?: () => Date;
   cleanupIntervalMs?: number;
 }
@@ -63,11 +93,19 @@ function resolveOwnerGroup(wallet: WalletEntry): { ownerGroup: string; isFallbac
   return { ownerGroup: wallet.address.toLowerCase(), isFallback: true };
 }
 
+function formatUsd(n: number): string {
+  const abs = Math.abs(n);
+  if (abs >= 1_000_000) return `$${(n / 1_000_000).toFixed(1)}M`;
+  if (abs >= 1_000) return `$${(n / 1_000).toFixed(1)}K`;
+  return `$${n.toFixed(0)}`;
+}
+
 export function createResonanceDetector(deps: ResonanceDetectorDeps): ResonanceDetector {
   const config: ResonanceConfig = { ...DEFAULT_RESONANCE_CONFIG, ...deps.config };
   const now = deps.now ?? (() => new Date());
   const windows = new Map<number, WindowEntry[]>();
   const cooldowns = new Map<number, CooldownState>();
+  const officialStockTokens = deps.officialStockTokens ?? new Set<string>();
 
   const cleanupTimer = setInterval(() => {
     const nowDate = now();
@@ -120,10 +158,72 @@ export function createResonanceDetector(deps: ResonanceDetectorDeps): ResonanceD
         hadTierA: stats.tierAOwnerGroups > 0,
       });
 
-      const snapshot = deps.getMarketSnapshot?.(event.tokenId);
-
       const walletBreakdown = summarizeByWallet(pruned);
 
+      // --- Gather everything Phase 7 scoring needs -----------------------
+      const marketSnapshot = deps.getMarketSnapshot?.(event.tokenId);
+      const flowState = deps.getWatchedFlowState?.(event.tokenId) ?? {
+        aggregateWatchedBuyUsd: 0,
+        aggregateWatchedSellUsd: 0,
+        repeatBuyerCount: 0,
+      };
+      const [recentSnapshots, tradeTotals, hasDeployerSold, largestRecentSellUsd, narrativeBoost] = await Promise.all([
+        deps.getRecentSnapshots?.(event.tokenId, RECENT_SNAPSHOTS_FOR_TREND) ?? Promise.resolve([]),
+        deps.getTradeTotals?.(event.tokenId) ?? Promise.resolve({ buys: 0, sells: 0 }),
+        deps.hasDeployerSold?.(event.tokenId, event.tokenDeployer) ?? Promise.resolve(null),
+        deps.getLargestRecentSellUsd?.(event.tokenId, nowDate, config.windowMinutes) ?? Promise.resolve(null),
+        deps.getNarrativeBoost?.(event.tokenId) ?? Promise.resolve(null),
+      ]);
+
+      const ageMs = nowDate.getTime() - event.tokenLaunchTime.getTime();
+      const hasUsdFlowData = flowState.aggregateWatchedBuyUsd > 0 || flowState.aggregateWatchedSellUsd > 0;
+
+      const { score: importanceScore, breakdown: scoreBreakdown } = computeImportanceScore({
+        distinctOwnerGroups: stats.distinctOwnerGroups,
+        tierAOwnerGroups: stats.tierAOwnerGroups,
+        flow: flowState,
+        acceleration: {
+          volume5m: marketSnapshot?.volume5m ?? null,
+          buys5m: marketSnapshot?.buys5m ?? null,
+          sells5m: marketSnapshot?.sells5m ?? null,
+          recentSnapshots,
+        },
+        marketQuality: {
+          liquidity: marketSnapshot?.liquidity ?? null,
+          marketCap: marketSnapshot?.marketCap ?? null,
+          totalBuys: tradeTotals.buys,
+          totalSells: tradeTotals.sells,
+        },
+        narrative: {
+          pairTokenAddress: event.tokenPairToken,
+          officialStockTokens,
+          narrativeBoost,
+        },
+        ageMs,
+      });
+
+      const { level: riskLevel, breakdown: riskBreakdown } = computeRisk({
+        liquidity: marketSnapshot?.liquidity ?? null,
+        marketCap: marketSnapshot?.marketCap ?? null,
+        ageMs,
+        buys5m: marketSnapshot?.buys5m ?? null,
+        sells5m: marketSnapshot?.sells5m ?? null,
+        largestRecentSellUsd,
+        aggregateWatchedBuyUsd: flowState.aggregateWatchedBuyUsd,
+        aggregateWatchedSellUsd: flowState.aggregateWatchedSellUsd,
+        hasDeployerSold,
+      });
+
+      const fallbackOwnerGroupCount = walletBreakdown.filter((w) => w.ownerGroupIsFallback).length;
+      const { level: confidenceLevel, reasons: confidenceReasons } = computeConfidence({
+        hasMarketData: marketSnapshot !== undefined,
+        snapshotCount: recentSnapshots.length,
+        hasUsdFlowData,
+        fallbackOwnerGroupCount,
+        ageMs,
+      });
+
+      // --- Persist ---------------------------------------------------------
       let signalId: number;
       try {
         signalId = await deps.signalsRepo.create({
@@ -135,9 +235,15 @@ export function createResonanceDetector(deps: ResonanceDetectorDeps): ResonanceD
           hasRepeatAccumulation: stats.hasRepeatAccumulation,
           windowMinutes: config.windowMinutes,
           escalation: decision.escalation,
-          marketCap: snapshot?.marketCap ?? null,
-          liquidity: snapshot?.liquidity ?? null,
-          volume5m: snapshot?.volume5m ?? null,
+          marketCap: marketSnapshot?.marketCap ?? null,
+          liquidity: marketSnapshot?.liquidity ?? null,
+          volume5m: marketSnapshot?.volume5m ?? null,
+          importanceScore,
+          scoreBreakdown,
+          riskLevel,
+          riskBreakdown,
+          confidence: confidenceLevel,
+          confidenceReasons,
         });
       } catch (err) {
         deps.logger.error({ err, token: event.tokenAddress }, "failed to persist resonance signal");
@@ -171,12 +277,34 @@ export function createResonanceDetector(deps: ResonanceDetectorDeps): ResonanceD
           escalation: decision.escalation,
           windowMinutes: config.windowMinutes,
           wallets: walletBreakdown.map((w) => `${w.name} (Tier ${w.tier})`),
-          marketCap: snapshot?.marketCap ?? null,
-          liquidity: snapshot?.liquidity ?? null,
-          volume5m: snapshot?.volume5m ?? null,
+          marketCap: marketSnapshot?.marketCap ?? null,
+          liquidity: marketSnapshot?.liquidity ?? null,
+          volume5m: marketSnapshot?.volume5m ?? null,
+          importanceScore,
+          riskLevel,
+          confidence: confidenceLevel,
         },
         "resonance signal triggered — this is a detection trigger for review, not a buy recommendation",
       );
+
+      // Human-readable multi-line summary, for reading straight off a terminal.
+      const netFlow = flowState.aggregateWatchedBuyUsd - flowState.aggregateWatchedSellUsd;
+      const bsRatio5m =
+        marketSnapshot?.buys5m != null && marketSnapshot.sells5m != null && marketSnapshot.sells5m > 0
+          ? `${(marketSnapshot.buys5m / marketSnapshot.sells5m).toFixed(1)}:1`
+          : "unknown";
+      const mcLiqRatio =
+        marketSnapshot?.marketCap != null && marketSnapshot.liquidity ? (marketSnapshot.marketCap / marketSnapshot.liquidity).toFixed(2) : "unknown";
+      const summaryLines = [
+        `[SIGNAL] ${event.tokenSymbol ?? event.tokenAddress} ${importanceScore.toFixed(1)}/10 | Risk: ${riskLevel} | Confidence: ${confidenceLevel}`,
+        `  Resonance ${scoreBreakdown.resonance.score.toFixed(1)}/${scoreBreakdown.resonance.max} (${stats.distinctOwnerGroups} ownerGroups, ${stats.tierAOwnerGroups} Tier A)`,
+        `  Flow ${scoreBreakdown.flow.score.toFixed(1)}/${scoreBreakdown.flow.max} (net ${netFlow >= 0 ? "+" : "-"}${formatUsd(Math.abs(netFlow))}, ${flowState.repeatBuyerCount} repeat buyers)`,
+        `  Acceleration ${scoreBreakdown.acceleration.score.toFixed(1)}/${scoreBreakdown.acceleration.max} (5m vol ${marketSnapshot?.volume5m != null ? formatUsd(marketSnapshot.volume5m) : "unknown"}, buy/sell ${bsRatio5m})`,
+        `  Market Quality ${scoreBreakdown.marketQuality.score.toFixed(1)}/${scoreBreakdown.marketQuality.max} (liq ${marketSnapshot?.liquidity != null ? formatUsd(marketSnapshot.liquidity) : "unknown"}, mc/liq ${mcLiqRatio})`,
+        `  Narrative ${scoreBreakdown.narrative.score.toFixed(1)}/${scoreBreakdown.narrative.max} (${scoreBreakdown.narrative.reasons.join("; ")})`,
+        `  Earlyness ${scoreBreakdown.earlyness.score.toFixed(1)}/${scoreBreakdown.earlyness.max} (age ${(ageMs / 60_000).toFixed(0)}min)`,
+      ];
+      deps.logger.info(summaryLines.join("\n"));
     },
 
     stop() {
@@ -194,6 +322,7 @@ interface WalletBreakdown {
   name: string;
   tier: WalletTier;
   ownerGroup: string;
+  ownerGroupIsFallback: boolean;
   buyCount: number;
   buyAmount: bigint;
 }
@@ -211,6 +340,7 @@ function summarizeByWallet(entries: WindowEntry[]): WalletBreakdown[] {
         name: entry.name,
         tier: entry.tier,
         ownerGroup: entry.ownerGroup,
+        ownerGroupIsFallback: entry.ownerGroupIsFallback,
         buyCount: 1,
         buyAmount: entry.quoteAmount,
       });

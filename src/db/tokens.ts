@@ -24,6 +24,7 @@ export interface TrackedToken {
   address: string;
   symbol: string | null;
   launchSource: LaunchSource;
+  deployer: string;
   pairToken: string;
   pool: string;
   launchBlock: bigint;
@@ -65,6 +66,7 @@ export function createTokensRepo(db: Database): TokensRepo {
           address: tokens.address,
           symbol: tokens.symbol,
           launchSource: tokens.launchSource,
+          deployer: tokens.deployer,
           pairToken: tokens.pairToken,
           pool: tokens.pool,
           launchBlock: tokens.launchBlock,

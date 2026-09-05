@@ -35,6 +35,8 @@ export interface LatestMarketSnapshot {
   marketCap: number | null;
   liquidity: number | null;
   volume5m: number | null;
+  buys5m: number | null;
+  sells5m: number | null;
 }
 
 export interface CandidateTrackerDeps {
@@ -110,6 +112,8 @@ export function createCandidateTracker(deps: CandidateTrackerDeps): CandidateTra
         marketCap: snapshot.marketCap,
         liquidity: snapshot.liquidityUsd,
         volume5m: snapshot.volume5m,
+        buys5m: snapshot.buys5m,
+        sells5m: snapshot.sells5m,
       });
     } else {
       deps.logger.debug({ token: candidate.address }, "no DexScreener data yet — skipping snapshot write");

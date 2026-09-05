@@ -3,6 +3,7 @@ import {
   boolean,
   index,
   integer,
+  jsonb,
   numeric,
   pgEnum,
   pgTable,
@@ -126,6 +127,8 @@ export const tokenSnapshots = pgTable(
 );
 
 export const signalTriggerConditionEnum = pgEnum("signal_trigger_condition", ["A", "B", "C"]);
+export const riskLevelEnum = pgEnum("risk_level", ["LOW", "MEDIUM", "HIGH", "CRITICAL", "UNKNOWN"]);
+export const confidenceLevelEnum = pgEnum("confidence_level", ["LOW", "MEDIUM", "HIGH"]);
 
 // A resonance signal is a TRIGGER, not a buy recommendation — see
 // signals/resonanceLogic.ts. This table only records that the detector
@@ -155,6 +158,23 @@ export const signals = pgTable(
     marketCap: numeric("market_cap", { precision: 38, scale: 2 }),
     liquidity: numeric("liquidity", { precision: 38, scale: 2 }),
     volume5m: numeric("volume_5m", { precision: 38, scale: 2 }),
+    // Phase 7: all rule-based, no ML — see signals/scoring.ts and
+    // signals/risk.ts. Every number here must be reconstructable from
+    // score_breakdown/risk_breakdown; nothing is a black box.
+    importanceScore: numeric("importance_score", { precision: 4, scale: 2 }),
+    // Structured per-dimension breakdown (score + reasons) — see
+    // signals/scoring.ts's ScoreBreakdown shape.
+    scoreBreakdown: jsonb("score_breakdown"),
+    riskLevel: riskLevelEnum("risk_level"),
+    // Per-factor breakdown (level + reason) — see signals/risk.ts's
+    // RiskBreakdown shape. UNKNOWN factors are recorded here too, even
+    // when the overall riskLevel isn't UNKNOWN.
+    riskBreakdown: jsonb("risk_breakdown"),
+    confidence: confidenceLevelEnum("confidence"),
+    // Human-readable reasons for the confidence level — independent of
+    // importanceScore and riskLevel (a high-importance signal can be
+    // low-confidence at the same time; that's not a bug).
+    confidenceReasons: jsonb("confidence_reasons"),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [index("signals_token_id_triggered_at_idx").on(table.tokenId, table.triggeredAt)],
@@ -188,7 +208,16 @@ export const signalOutcomes = pgTable("signal_outcomes", {
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 });
 
+// Manually-curated narrative boost per token — V1 does no AI narrative
+// analysis (see signals/scoring.ts's Dimension E). A human sets `boost`
+// (0-1) after judging a token's narrative relevance; the scorer only ever
+// reads the latest row for a token, never infers one itself.
 export const narrativeFlags = pgTable("narrative_flags", {
   id: serial("id").primaryKey(),
+  tokenId: integer("token_id")
+    .notNull()
+    .references(() => tokens.id),
+  boost: numeric("boost", { precision: 3, scale: 2 }).notNull(),
+  notes: text("notes"),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 });

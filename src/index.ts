@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { loadEnv } from "./config/index.js";
 import { createLogger } from "./logger.js";
 import { buildServer } from "./api/server.js";
@@ -8,6 +10,7 @@ import { createTradesRepo } from "./db/trades.js";
 import { createWalletWatchlistRepo } from "./db/walletWatchlist.js";
 import { createTokenSnapshotsRepo } from "./db/tokenSnapshots.js";
 import { createSignalsRepo } from "./db/signals.js";
+import { createNarrativeFlagsRepo } from "./db/narrativeFlags.js";
 import { createWatchlistCache } from "./watchlist/watchlistCache.js";
 import { CHAIN_ID, createHttpClient, createWsClient } from "./chain/client.js";
 import { ChainWatcher } from "./chain/watcher.js";
@@ -51,6 +54,26 @@ function resonanceConfigFromEnv(env: {
   return overrides;
 }
 
+/**
+ * Manually-curated official Robinhood stock-token addresses (config/stockTokens.json),
+ * used only by scoring.ts's Narrative dimension — never inferred or guessed.
+ * Empty by default; the file is filled in by hand as tokens are confirmed.
+ */
+function loadOfficialStockTokens(logger: ReturnType<typeof createLogger>): ReadonlySet<string> {
+  try {
+    const filePath = resolve(process.cwd(), "config/stockTokens.json");
+    const raw = readFileSync(filePath, "utf8");
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      throw new Error("config/stockTokens.json must contain a JSON array of addresses");
+    }
+    return new Set(parsed.map((a) => String(a).toLowerCase()));
+  } catch (err) {
+    logger.warn({ err }, "could not load config/stockTokens.json — Narrative dimension's official-stock-pair bonus will never apply");
+    return new Set();
+  }
+}
+
 async function main(): Promise<void> {
   const env = loadEnv();
   const logger = createLogger(env.LOG_LEVEL);
@@ -62,7 +85,9 @@ async function main(): Promise<void> {
   const walletsRepo = createWalletWatchlistRepo(db);
   const snapshotsRepo = createTokenSnapshotsRepo(db);
   const signalsRepo = createSignalsRepo(db);
+  const narrativeFlagsRepo = createNarrativeFlagsRepo(db);
   const watchlistCache = createWatchlistCache(walletsRepo, logger);
+  const officialStockTokens = loadOfficialStockTokens(logger);
   const httpClient = createHttpClient(env.RH_RPC_HTTP);
   const dexscreener = createDexScreenerClient(logger);
 
@@ -94,6 +119,14 @@ async function main(): Promise<void> {
     logger,
     config: resonanceConfigFromEnv(env),
     getMarketSnapshot: (tokenId) => candidateTracker.getLatestMarketSnapshot(tokenId),
+    getWatchedFlowState: (tokenId) => candidateTracker.getAggregateState(tokenId),
+    getRecentSnapshots: (tokenId, limit) => snapshotsRepo.listRecent(tokenId, limit),
+    getTradeTotals: (tokenId) => tradesRepo.countTotalBuysSells(tokenId),
+    hasDeployerSold: (tokenId, deployer) => tradesRepo.hasWalletSold(tokenId, deployer),
+    getLargestRecentSellUsd: (tokenId, before, windowMinutes) =>
+      tradesRepo.getLargestSellUsdSince(tokenId, before, windowMinutes),
+    getNarrativeBoost: (tokenId) => narrativeFlagsRepo.getLatestBoost(tokenId),
+    officialStockTokens,
   });
 
   const detector = createNewTokenDetector({

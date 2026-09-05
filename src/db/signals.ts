@@ -2,6 +2,8 @@ import { count, desc, gte } from "drizzle-orm";
 import type { Database } from "./client.js";
 import { signalWallets, signals } from "./schema.js";
 import type { WalletTier } from "./walletWatchlist.js";
+import type { ScoreBreakdown, ConfidenceLevel } from "../signals/scoring.js";
+import type { RiskBreakdown, RiskLevel } from "../signals/risk.js";
 
 export type TriggerCondition = "A" | "B" | "C";
 
@@ -17,6 +19,13 @@ export interface NewSignal {
   marketCap: number | null;
   liquidity: number | null;
   volume5m: number | null;
+  /** Phase 7 — all optional so Phase 6-era callers/tests keep working unscored. */
+  importanceScore?: number;
+  scoreBreakdown?: ScoreBreakdown;
+  riskLevel?: RiskLevel;
+  riskBreakdown?: RiskBreakdown;
+  confidence?: ConfidenceLevel;
+  confidenceReasons?: string[];
 }
 
 export interface NewSignalWallet {
@@ -48,6 +57,12 @@ export function createSignalsRepo(db: Database): SignalsRepo {
           marketCap: signal.marketCap === null ? null : signal.marketCap.toString(),
           liquidity: signal.liquidity === null ? null : signal.liquidity.toString(),
           volume5m: signal.volume5m === null ? null : signal.volume5m.toString(),
+          importanceScore: signal.importanceScore === undefined ? null : signal.importanceScore.toString(),
+          scoreBreakdown: signal.scoreBreakdown ?? null,
+          riskLevel: signal.riskLevel ?? null,
+          riskBreakdown: signal.riskBreakdown ?? null,
+          confidence: signal.confidence ?? null,
+          confidenceReasons: signal.confidenceReasons ?? null,
         })
         .returning({ id: signals.id });
       return rows[0]!.id;

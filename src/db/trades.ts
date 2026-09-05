@@ -1,4 +1,4 @@
-import { and, asc, count, eq, inArray, isNull, max } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, inArray, isNotNull, isNull, lte, max } from "drizzle-orm";
 import type { Database } from "./client.js";
 import { tokens, trades } from "./schema.js";
 
@@ -47,6 +47,12 @@ export interface TradesRepo {
   countBuysByWallet(tokenId: number): Promise<Map<string, number>>;
   /** Most recent trade timestamp per token, for the given token ids. */
   lastTradeAtByToken(tokenIds: number[]): Promise<Map<number, Date>>;
+  /** All-time BUY/SELL counts for a token, across all traders — for scoring.ts's Market Quality structure check. */
+  countTotalBuysSells(tokenId: number): Promise<{ buys: number; sells: number }>;
+  /** Has this wallet (e.g. the token's deployer) ever sold this token? */
+  hasWalletSold(tokenId: number, wallet: string): Promise<boolean>;
+  /** The largest single SELL (by usd_value) for a token in the `windowMinutes` up to (and including) `before`, if any trade in that window has a known usd_value. Null if none qualify (including "none have usd_value yet"). Takes an explicit reference time rather than the wall clock so it works correctly for historical replay, not just live operation. */
+  getLargestSellUsdSince(tokenId: number, before: Date, windowMinutes: number): Promise<number | null>;
 }
 
 export function createTradesRepo(db: Database): TradesRepo {
@@ -122,6 +128,50 @@ export function createTradesRepo(db: Database): TradesRepo {
         if (r.lastAt) result.set(r.tokenId, new Date(r.lastAt));
       }
       return result;
+    },
+
+    async countTotalBuysSells(tokenId) {
+      const rows = await db
+        .select({ side: trades.side, cnt: count() })
+        .from(trades)
+        .where(eq(trades.tokenId, tokenId))
+        .groupBy(trades.side);
+      let buys = 0;
+      let sells = 0;
+      for (const r of rows) {
+        if (r.side === "BUY") buys = Number(r.cnt);
+        else sells = Number(r.cnt);
+      }
+      return { buys, sells };
+    },
+
+    async hasWalletSold(tokenId, wallet) {
+      const rows = await db
+        .select({ id: trades.id })
+        .from(trades)
+        .where(and(eq(trades.tokenId, tokenId), eq(trades.wallet, wallet.toLowerCase()), eq(trades.side, "SELL")))
+        .limit(1);
+      return rows.length > 0;
+    },
+
+    async getLargestSellUsdSince(tokenId, before, windowMinutes) {
+      const since = new Date(before.getTime() - windowMinutes * 60_000);
+      const rows = await db
+        .select({ usdValue: trades.usdValue })
+        .from(trades)
+        .where(
+          and(
+            eq(trades.tokenId, tokenId),
+            eq(trades.side, "SELL"),
+            gt(trades.timestamp, since),
+            lte(trades.timestamp, before),
+            isNotNull(trades.usdValue),
+          ),
+        )
+        .orderBy(desc(trades.usdValue))
+        .limit(1);
+      const row = rows[0];
+      return row?.usdValue === null || row?.usdValue === undefined ? null : Number(row.usdValue);
     },
   };
 }
