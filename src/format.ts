@@ -24,12 +24,20 @@ export function formatAge(ageMs: number): string {
   return `${(minutes / 1_440).toFixed(1)}d`;
 }
 
-// Raw on-chain quote-currency base units → approximate human amount. Assumes
-// 18 decimals (same display caveat as signal_wallets.buy_amount) — comparable
+// Raw on-chain quote-currency base units → human amount, optionally suffixed
+// with the currency symbol. A trade magnitude is never negative, so a signed
+// on-chain delta (Doppler's Swap reports the *swapper's* balance change,
+// which goes negative when they pay in the quote currency) is taken as its
+// absolute value here — a BUY/SELL amount must never render with a minus
+// sign. Assumes an 18-decimal quote currency (WETH / native ETH on this
+// chain); same display caveat as signal_wallets.buy_amount — comparable
 // across wallets within one alert, not an exact figure.
-export function formatQuoteAmount(raw: bigint): string {
-  if (raw === 0n) return "0";
-  const asNumber = Number(raw) / 1e18;
-  if (!Number.isFinite(asNumber)) return raw.toString();
-  return `~${asNumber.toLocaleString(undefined, { maximumFractionDigits: 4 })}`;
+export function formatQuoteAmount(raw: bigint, symbol?: string | null): string {
+  const magnitude = raw < 0n ? -raw : raw;
+  const unit = symbol ? ` ${symbol}` : "";
+  if (magnitude === 0n) return `0${unit}`;
+  const asNumber = Number(magnitude) / 1e18;
+  if (!Number.isFinite(asNumber)) return `${magnitude.toString()}${unit}`;
+  const maximumFractionDigits = asNumber < 1 ? 6 : 4;
+  return `${asNumber.toLocaleString(undefined, { maximumFractionDigits })}${unit}`;
 }

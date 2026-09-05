@@ -35,6 +35,7 @@ function baseContext(overrides: Partial<AlertContext> = {}): AlertContext {
     tokenAddress: "0xAbCdEf0000000000000000000000000000001234",
     tokenSymbol: "MOLLIE",
     tokenName: "Mollie Coin",
+    quoteTokenSymbol: "WETH",
     ageMs: 22 * 60_000,
     triggerConditions: ["A", "B"],
     windowMinutes: 20,

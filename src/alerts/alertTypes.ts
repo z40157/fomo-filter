@@ -27,6 +27,8 @@ export interface AlertContext {
   tokenAddress: string;
   tokenSymbol: string | null;
   tokenName: string | null;
+  /** ERC-20 symbol of the quote/pair currency the per-wallet buy/sell amounts are denominated in (e.g. "WETH"). Null when unresolved — templates fall back to a generic "quote units" label rather than printing a bare number. */
+  quoteTokenSymbol: string | null;
   ageMs: number;
   triggerConditions: TriggerCondition[];
   windowMinutes: number;

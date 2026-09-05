@@ -21,6 +21,7 @@ import { createDexScreenerClient } from "./market/dexscreener.js";
 import { createCandidateTracker } from "./market/candidateTracker.js";
 import type { TrackerConfig } from "./market/candidateTrackerLogic.js";
 import { createErc20DecimalsResolver, createUsdEnrichmentJob } from "./market/usdEnrichment.js";
+import { resolveTokenMetadata } from "./chain/erc20.js";
 import { createResonanceDetector } from "./signals/resonanceDetector.js";
 import type { ResonanceConfig } from "./signals/resonanceLogic.js";
 import { createAlertDispatcher } from "./alerts/alertDispatcher.js";
@@ -152,10 +153,29 @@ async function main(): Promise<void> {
     config: trackerConfigFromEnv(env),
   });
 
+  // Resolve each pair/quote token's ERC-20 symbol once, for display in alert
+  // messages ("bought 0.0037 WETH" instead of a bare number). Cached per
+  // process; the all-zero address is this chain's native-currency sentinel.
+  const quoteSymbolCache = new Map<string, string | null>();
+  async function getQuoteTokenSymbol(pairToken: string): Promise<string | null> {
+    const key = pairToken.toLowerCase();
+    const cached = quoteSymbolCache.get(key);
+    if (cached !== undefined) return cached;
+    let symbol: string | null = null;
+    if (/^0x0+$/.test(key)) {
+      symbol = "ETH";
+    } else {
+      symbol = (await resolveTokenMetadata(httpClient, pairToken as `0x${string}`, logger)).symbol;
+    }
+    quoteSymbolCache.set(key, symbol);
+    return symbol;
+  }
+
   const resonanceDetector = createResonanceDetector({
     signalsRepo,
     logger,
     config: resonanceConfigFromEnv(env),
+    getQuoteTokenSymbol,
     getMarketSnapshot: (tokenId) => candidateTracker.getLatestMarketSnapshot(tokenId),
     getWatchedFlowState: (tokenId) => candidateTracker.getAggregateState(tokenId),
     getRecentSnapshots: (tokenId, limit) => snapshotsRepo.listRecent(tokenId, limit),

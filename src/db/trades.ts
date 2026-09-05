@@ -1,4 +1,4 @@
-import { and, asc, count, desc, eq, gt, inArray, isNotNull, isNull, lte, max } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, inArray, isNotNull, isNull, lte, max, sql } from "drizzle-orm";
 import type { Database } from "./client.js";
 import { tokens, trades } from "./schema.js";
 
@@ -182,6 +182,12 @@ export function createTradesRepo(db: Database): TradesRepo {
 
     async getSellTotalsByWallets(tokenId, wallets, before) {
       if (wallets.length === 0) return new Map();
+      // Match case-insensitively and key the result lowercased: `trades.wallet`
+      // is written from viem's `tx.from`, which is EIP-55 checksummed, while
+      // callers pass lowercased watchlist addresses. (recordTrade also
+      // lowercases on write now, so this only matters for rows recorded
+      // before that fix — but it's the safe thing to do regardless.)
+      const lowered = wallets.map((w) => w.toLowerCase());
       const rows = await db
         .select({ wallet: trades.wallet, quoteAmount: trades.quoteAmount })
         .from(trades)
@@ -189,17 +195,18 @@ export function createTradesRepo(db: Database): TradesRepo {
           and(
             eq(trades.tokenId, tokenId),
             eq(trades.side, "SELL"),
-            inArray(trades.wallet, wallets),
+            inArray(sql`lower(${trades.wallet})`, lowered),
             lte(trades.timestamp, before),
           ),
         );
 
       const result = new Map<string, { sellAmount: bigint; sellCount: number }>();
       for (const r of rows) {
-        const existing = result.get(r.wallet) ?? { sellAmount: 0n, sellCount: 0 };
+        const key = r.wallet.toLowerCase();
+        const existing = result.get(key) ?? { sellAmount: 0n, sellCount: 0 };
         existing.sellAmount += BigInt(r.quoteAmount);
         existing.sellCount += 1;
-        result.set(r.wallet, existing);
+        result.set(key, existing);
       }
       return result;
     },

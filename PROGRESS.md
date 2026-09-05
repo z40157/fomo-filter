@@ -569,6 +569,27 @@ header, body, footer — is worded as "you should buy this".
   later purely by setting `RESEND_API_KEY` / `ALERT_EMAIL_FROM` /
   `ALERT_EMAIL_TO`. Shared number formatting (`formatUsd`, `formatAge`,
   `formatQuoteAmount`, …) moved to `src/format.ts` so both templates agree.
+- **Watched-wallets block fixes (2026-09-05, after first real send).** (1)
+  Per-wallet amounts dropped the `~` prefix (it read as a minus sign on a
+  phone) and `formatQuoteAmount` now takes the absolute value of the raw
+  bigint, so a signed on-chain quote delta can never render negative for a
+  BUY. (2) Amounts now carry a unit — the pair/quote token's ERC-20 symbol
+  (`8.4 WETH`), resolved once per token from `tokens.pairToken` via
+  `resolveTokenMetadata` and cached in `index.ts` (all-zero address → the
+  native `ETH` sentinel; unresolved → the literal label `quote units`,
+  never a bare number). Carried on `AlertContext.quoteTokenSymbol`, used by
+  both templates; sub-1.0 amounts now show 6 fraction digits. (3) Latent
+  bug found + fixed in the sell-totals path: `trades.wallet` was written
+  from viem's EIP-55-checksummed `tx.from` while `getSellTotalsByWallets`
+  matched lowercased watchlist addresses — it would have returned zero
+  sells in production. `recordTrade` now lowercases `wallet` on write (the
+  convention `wallet_watchlist` and `listByTokenAndWallets`'s own
+  doc-comment already assumed), and `getSellTotalsByWallets` matches on
+  `lower(trades.wallet)` so it's also correct for rows already stored
+  checksummed. **Follow-up:** a one-time `UPDATE trades SET wallet =
+  lower(wallet);` would additionally fix `hasWalletSold` (deployer-sold
+  risk) and Phase 5's `listByTokenAndWallets` aggregates for the ~7k
+  historical rows; new rows need no backfill.
 - **Real send test (2026-09-05).** With a real bot token + chat id in
   `.env` (gitignored), three mock signals covering all three bands —
   NORMAL (7.4), STRONG (8.5), and URGENT (9.3) with `riskLevel: UNKNOWN` /

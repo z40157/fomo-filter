@@ -305,10 +305,15 @@ export function createTradeDetector(deps: TradeDetectorDeps): TradeDetector {
     logIndex: number;
   }): Promise<void> {
     try {
-      const [wallet, timestamp] = await Promise.all([
+      const [rawWallet, timestamp] = await Promise.all([
         deps.httpClient.getTransactionSender(params.transactionHash),
         deps.httpClient.getBlockTimestamp(params.blockNumber),
       ]);
+      // viem returns tx.from EIP-55 checksummed; store lowercased so every
+      // downstream wallet filter (watchlist matching, per-wallet sell totals,
+      // deployer-sold check) compares against a single canonical form — same
+      // convention wallet_watchlist already uses.
+      const wallet = rawWallet.toLowerCase();
 
       const trade: NewTrade = {
         chainId: deps.chainId,

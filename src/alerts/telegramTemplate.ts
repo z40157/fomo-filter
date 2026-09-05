@@ -68,12 +68,13 @@ export function renderTelegramMessage(ctx: AlertContext): string {
     }),
   );
 
+  const unit = ctx.quoteTokenSymbol ?? "quote units";
   const walletLines =
     ctx.wallets.length > 0
       ? ctx.wallets
           .map((w) => {
-            const sold = w.sellAmount > 0n ? `, sold ${formatQuoteAmount(w.sellAmount)}` : "";
-            return `• ${escapeTelegramHtml(w.name)} (${w.tier}) — bought ${formatQuoteAmount(w.buyAmount)}${sold}`;
+            const sold = w.sellAmount > 0n ? `, sold ${formatQuoteAmount(w.sellAmount, unit)}` : "";
+            return `• ${escapeTelegramHtml(w.name)} (${w.tier}) — bought ${formatQuoteAmount(w.buyAmount, unit)}${sold}`;
           })
           .join("\n")
       : "• (no per-wallet breakdown available)";

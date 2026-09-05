@@ -57,6 +57,7 @@ function baseInput(overrides: Partial<AlertDispatchInput> = {}): AlertDispatchIn
     tokenAddress: "0xTOKEN",
     tokenSymbol: "MOLLIE",
     tokenName: "Mollie",
+    quoteTokenSymbol: "WETH",
     ageMs: 60_000,
     triggerConditions: ["A"],
     windowMinutes: 20,
@@ -269,6 +270,6 @@ describe("createAlertDispatcher — wallet sell enrichment", () => {
 
     expect(getWalletSells).toHaveBeenCalledWith(10, ["0xWALLET"], expect.any(Date));
     const sentText = (telegramClient.sendMessage as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as string;
-    expect(sentText).toContain("Alice (A) — bought ~1, sold ~0.5");
+    expect(sentText).toContain("Alice (A) — bought 1 WETH, sold 0.5 WETH");
   });
 });

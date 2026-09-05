@@ -75,6 +75,8 @@ export interface ResonanceDetectorDeps {
   getLargestRecentSellUsd?: (tokenId: number, before: Date, windowMinutes: number) => Promise<number | null>;
   /** Latest manually-set narrative boost (0-1) for the token, or null. */
   getNarrativeBoost?: (tokenId: number) => Promise<number | null>;
+  /** The quote/pair token's ERC-20 symbol for display in alerts (e.g. "WETH"), given the token's pairToken address. Null when it can't be resolved (e.g. the native-currency sentinel). Expected to be cached upstream. */
+  getQuoteTokenSymbol?: (pairToken: string) => Promise<string | null>;
   /** Lowercased official Robinhood stock-token addresses, from config/stockTokens.json. Empty by default. */
   officialStockTokens?: ReadonlySet<string>;
   /** Phase 8: fires email/Telegram alerts for signals that clear the importance threshold and dedup rules — undefined means alerting is off entirely (never crashes or blocks signal persistence either way). */
@@ -165,13 +167,15 @@ export function createResonanceDetector(deps: ResonanceDetectorDeps): ResonanceD
         aggregateWatchedSellUsd: 0,
         repeatBuyerCount: 0,
       };
-      const [recentSnapshots, tradeTotals, hasDeployerSold, largestRecentSellUsd, narrativeBoost] = await Promise.all([
-        deps.getRecentSnapshots?.(event.tokenId, RECENT_SNAPSHOTS_FOR_TREND) ?? Promise.resolve([]),
-        deps.getTradeTotals?.(event.tokenId) ?? Promise.resolve({ buys: 0, sells: 0 }),
-        deps.hasDeployerSold?.(event.tokenId, event.tokenDeployer) ?? Promise.resolve(null),
-        deps.getLargestRecentSellUsd?.(event.tokenId, nowDate, config.windowMinutes) ?? Promise.resolve(null),
-        deps.getNarrativeBoost?.(event.tokenId) ?? Promise.resolve(null),
-      ]);
+      const [recentSnapshots, tradeTotals, hasDeployerSold, largestRecentSellUsd, narrativeBoost, quoteTokenSymbol] =
+        await Promise.all([
+          deps.getRecentSnapshots?.(event.tokenId, RECENT_SNAPSHOTS_FOR_TREND) ?? Promise.resolve([]),
+          deps.getTradeTotals?.(event.tokenId) ?? Promise.resolve({ buys: 0, sells: 0 }),
+          deps.hasDeployerSold?.(event.tokenId, event.tokenDeployer) ?? Promise.resolve(null),
+          deps.getLargestRecentSellUsd?.(event.tokenId, nowDate, config.windowMinutes) ?? Promise.resolve(null),
+          deps.getNarrativeBoost?.(event.tokenId) ?? Promise.resolve(null),
+          deps.getQuoteTokenSymbol?.(event.tokenPairToken) ?? Promise.resolve(null),
+        ]);
 
       const ageMs = nowDate.getTime() - event.tokenLaunchTime.getTime();
       const hasUsdFlowData = flowState.aggregateWatchedBuyUsd > 0 || flowState.aggregateWatchedSellUsd > 0;
@@ -314,6 +318,7 @@ export function createResonanceDetector(deps: ResonanceDetectorDeps): ResonanceD
         tokenAddress: event.tokenAddress,
         tokenSymbol: event.tokenSymbol,
         tokenName: event.tokenName,
+        quoteTokenSymbol: quoteTokenSymbol ?? null,
         ageMs,
         triggerConditions: conditions,
         windowMinutes: config.windowMinutes,

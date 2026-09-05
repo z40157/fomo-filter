@@ -95,14 +95,15 @@ export function buildHtmlBody(ctx: AlertContext): string {
     triggerConditions: ctx.triggerConditions,
   });
 
+  const quoteUnit = ctx.quoteTokenSymbol ?? "quote units";
   const walletRows = ctx.wallets
     .map(
       (w) => `<tr>
         <td style="padding:4px 8px; border-bottom:1px solid #eee;">${escapeHtml(w.name)}</td>
         <td style="padding:4px 8px; border-bottom:1px solid #eee;">${w.tier}</td>
-        <td style="padding:4px 8px; border-bottom:1px solid #eee;">${formatQuoteAmount(w.buyAmount)}</td>
+        <td style="padding:4px 8px; border-bottom:1px solid #eee;">${formatQuoteAmount(w.buyAmount, quoteUnit)}</td>
         <td style="padding:4px 8px; border-bottom:1px solid #eee;">${w.buyCount}</td>
-        <td style="padding:4px 8px; border-bottom:1px solid #eee;">${formatQuoteAmount(w.sellAmount)}</td>
+        <td style="padding:4px 8px; border-bottom:1px solid #eee;">${formatQuoteAmount(w.sellAmount, quoteUnit)}</td>
       </tr>`,
     )
     .join("\n");

@@ -35,6 +35,7 @@ function baseContext(overrides: Partial<AlertContext> = {}): AlertContext {
     tokenAddress: "0xAbCdEf0000000000000000000000000000001234",
     tokenSymbol: "MOLLIE",
     tokenName: "Mollie Coin",
+    quoteTokenSymbol: "WETH",
     ageMs: 22 * 60_000,
     triggerConditions: ["A", "B"],
     windowMinutes: 20,
@@ -107,9 +108,11 @@ describe("renderTelegramMessage", () => {
     expect(msg).toContain("4 independent ownerGroups bought within the 20-minute window");
     expect(msg).toContain("2 Tier-A");
 
-    // participating watchlist wallets — name + tier + buy amount
-    expect(msg).toContain("Alice (A) — bought ~5");
-    expect(msg).toContain("Bob (B) — bought ~1");
+    // participating watchlist wallets — name + tier + buy amount, with a unit
+    expect(msg).toContain("Alice (A) — bought 5 WETH");
+    expect(msg).toContain("Bob (B) — bought 1 WETH, sold 0.5 WETH");
+    // buy amounts are never shown with a minus sign
+    expect(msg).not.toMatch(/bought -/);
 
     // links
     expect(msg).toContain(`<a href="https://dexscreener.com/robinhood/${ctx.tokenAddress}">DexScreener</a>`);
@@ -182,8 +185,34 @@ describe("renderTelegramMessage", () => {
     expect(msg).toContain("5m vol unknown");
   });
 
-  it("notes a wallet's sells when it has sold", () => {
+  it("shows a buy-only wallet without a 'sold' clause, and a buy+sell wallet with one", () => {
     const msg = renderTelegramMessage(baseContext());
-    expect(msg).toContain("Bob (B) — bought ~1, sold ~0.5");
+    // Alice bought, never sold
+    const aliceLine = msg.split("\n").find((l) => l.startsWith("• Alice"))!;
+    expect(aliceLine).toBe("• Alice (A) — bought 5 WETH");
+    // Bob both bought and sold
+    const bobLine = msg.split("\n").find((l) => l.startsWith("• Bob"))!;
+    expect(bobLine).toBe("• Bob (B) — bought 1 WETH, sold 0.5 WETH");
+  });
+
+  it("renders a signed on-chain quote delta as a positive magnitude (never a minus sign)", () => {
+    const msg = renderTelegramMessage(
+      baseContext({
+        wallets: [
+          // negative raw amount — Doppler reports the swapper's balance delta,
+          // which is negative when they pay in. It must still read as a buy.
+          { address: "0x1", name: "kol_alpha", tier: "A", buyAmount: -8_400_000_000_000_000_000n, buyCount: 3, sellAmount: 0n, sellCount: 0 },
+        ],
+      }),
+    );
+    expect(msg).toContain("kol_alpha (A) — bought 8.4 WETH");
+    expect(msg).not.toContain("-8.4");
+    expect(msg).not.toContain("−8.4");
+  });
+
+  it("falls back to a labelled unit (not a bare number) when the quote symbol is unresolved", () => {
+    const msg = renderTelegramMessage(baseContext({ quoteTokenSymbol: null }));
+    expect(msg).toContain("bought 5 quote units");
+    expect(msg).not.toMatch(/bought 5(\s|$)(?!quote)/);
   });
 });
