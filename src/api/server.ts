@@ -3,6 +3,7 @@ import type { Logger } from "../logger.js";
 import type { WatcherStatus } from "../chain/watcher.js";
 import type { WalletWatchlistRepo } from "../db/walletWatchlist.js";
 import type { WatchlistCache } from "../watchlist/watchlistCache.js";
+import type { DexScreenerStatus } from "../market/dexscreener.js";
 import { healthRoutes } from "./routes/health.js";
 import { walletRoutes } from "./routes/wallets.js";
 
@@ -15,6 +16,8 @@ export interface AppContext {
   walletsRepo: WalletWatchlistRepo;
   watchlistCache: WatchlistCache;
   adminApiKey: string | undefined;
+  countActiveCandidates: () => number;
+  getDexScreenerStatus: () => DexScreenerStatus;
 }
 
 export function buildServer(ctx: AppContext) {

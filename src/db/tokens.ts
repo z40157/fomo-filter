@@ -22,10 +22,12 @@ export interface NewToken {
 export interface TrackedToken {
   id: number;
   address: string;
+  symbol: string | null;
   launchSource: LaunchSource;
   pairToken: string;
   pool: string;
   launchBlock: bigint;
+  launchTime: Date;
   initializer: string | null;
   poolId: string | null;
 }
@@ -61,10 +63,12 @@ export function createTokensRepo(db: Database): TokensRepo {
         .select({
           id: tokens.id,
           address: tokens.address,
+          symbol: tokens.symbol,
           launchSource: tokens.launchSource,
           pairToken: tokens.pairToken,
           pool: tokens.pool,
           launchBlock: tokens.launchBlock,
+          launchTime: tokens.launchTime,
           initializer: tokens.initializer,
           poolId: tokens.poolId,
         })

@@ -6,13 +6,37 @@ import { createScannerStateRepo } from "./db/scannerState.js";
 import { createTokensRepo } from "./db/tokens.js";
 import { createTradesRepo } from "./db/trades.js";
 import { createWalletWatchlistRepo } from "./db/walletWatchlist.js";
+import { createTokenSnapshotsRepo } from "./db/tokenSnapshots.js";
 import { createWatchlistCache } from "./watchlist/watchlistCache.js";
 import { CHAIN_ID, createHttpClient, createWsClient } from "./chain/client.js";
 import { ChainWatcher } from "./chain/watcher.js";
 import { createDetectorHttpClient, createNewTokenDetector } from "./chain/newTokenDetector.js";
 import { createTradeDetectorHttpClient, createTradeDetector } from "./chain/tradeDetector.js";
+import { createDexScreenerClient } from "./market/dexscreener.js";
+import { createCandidateTracker } from "./market/candidateTracker.js";
+import type { TrackerConfig } from "./market/candidateTrackerLogic.js";
+import { createErc20DecimalsResolver, createUsdEnrichmentJob } from "./market/usdEnrichment.js";
 
 const WATCHLIST_REFRESH_INTERVAL_MS = 60_000;
+const USD_ENRICHMENT_INTERVAL_MS = 30_000;
+
+function trackerConfigFromEnv(env: {
+  CANDIDATE_ACTIVE_REFRESH_MS?: number;
+  CANDIDATE_INACTIVE_REFRESH_MS?: number;
+  CANDIDATE_MIN_TRACKING_HOURS?: number;
+  CANDIDATE_EXIT_INACTIVITY_HOURS?: number;
+}): Partial<TrackerConfig> {
+  const overrides: Partial<TrackerConfig> = {};
+  if (env.CANDIDATE_ACTIVE_REFRESH_MS !== undefined) overrides.activeRefreshMs = env.CANDIDATE_ACTIVE_REFRESH_MS;
+  if (env.CANDIDATE_INACTIVE_REFRESH_MS !== undefined) overrides.inactiveRefreshMs = env.CANDIDATE_INACTIVE_REFRESH_MS;
+  if (env.CANDIDATE_MIN_TRACKING_HOURS !== undefined) {
+    overrides.minTrackingDurationMs = env.CANDIDATE_MIN_TRACKING_HOURS * 60 * 60 * 1000;
+  }
+  if (env.CANDIDATE_EXIT_INACTIVITY_HOURS !== undefined) {
+    overrides.exitInactivityWindowMs = env.CANDIDATE_EXIT_INACTIVITY_HOURS * 60 * 60 * 1000;
+  }
+  return overrides;
+}
 
 async function main(): Promise<void> {
   const env = loadEnv();
@@ -23,8 +47,10 @@ async function main(): Promise<void> {
   const tokensRepo = createTokensRepo(db);
   const tradesRepo = createTradesRepo(db);
   const walletsRepo = createWalletWatchlistRepo(db);
+  const snapshotsRepo = createTokenSnapshotsRepo(db);
   const watchlistCache = createWatchlistCache(walletsRepo, logger);
   const httpClient = createHttpClient(env.RH_RPC_HTTP);
+  const dexscreener = createDexScreenerClient(logger);
 
   await watchlistCache.refresh();
   // Event-based refresh (on API writes) covers the common case immediately;
@@ -75,6 +101,28 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  const candidateTracker = createCandidateTracker({
+    tokensRepo,
+    tradesRepo,
+    snapshotsRepo,
+    dexscreener,
+    watchlistCache,
+    logger,
+    config: trackerConfigFromEnv(env),
+  });
+  await candidateTracker.start();
+
+  // Backfills trades.usd_value from DexScreener snapshots. Runs on its own
+  // timer, fully decoupled from the chain watcher / trade detector above —
+  // it must never block real-time trade recording.
+  const usdEnrichmentJob = createUsdEnrichmentJob({
+    tradesRepo,
+    snapshotsRepo,
+    decimalsResolver: createErc20DecimalsResolver(httpClient, logger),
+    logger,
+  });
+  usdEnrichmentJob.start(USD_ENRICHMENT_INTERVAL_MS);
+
   const app = buildServer({
     logger,
     chainId: CHAIN_ID,
@@ -84,6 +132,8 @@ async function main(): Promise<void> {
     walletsRepo,
     watchlistCache,
     adminApiKey: env.ADMIN_API_KEY,
+    countActiveCandidates: () => candidateTracker.getActiveCandidateCount(),
+    getDexScreenerStatus: () => dexscreener.getStatus(),
   });
 
   try {

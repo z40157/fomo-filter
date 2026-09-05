@@ -1,5 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import type { AppContext } from "../server.js";
+import type { DexScreenerStatus } from "../../market/dexscreener.js";
 
 interface HealthResponse {
   status: "ok";
@@ -9,6 +10,8 @@ interface HealthResponse {
   database: "ok" | "error";
   trackedTokens: number;
   watchedWallets: number;
+  activeCandidates: number;
+  dexscreenerStatus: DexScreenerStatus;
 }
 
 export function healthRoutes(ctx: AppContext) {
@@ -28,6 +31,8 @@ export function healthRoutes(ctx: AppContext) {
         database,
         trackedTokens,
         watchedWallets: ctx.watchlistCache.size(),
+        activeCandidates: ctx.countActiveCandidates(),
+        dexscreenerStatus: ctx.getDexScreenerStatus(),
       };
     });
   };

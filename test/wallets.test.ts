@@ -69,7 +69,7 @@ function fakeWalletsRepo(): WalletWatchlistRepo & { rows: Map<string, WalletEntr
 }
 
 function fakeWatchlistCache(): WatchlistCache {
-  return { lookup: () => undefined, refresh: vi.fn(async () => {}), size: () => 0 };
+  return { lookup: () => undefined, refresh: vi.fn(async () => {}), size: () => 0, entries: () => [] };
 }
 
 function buildApp(walletsRepo: WalletWatchlistRepo, watchlistCache: WatchlistCache = fakeWatchlistCache()) {
@@ -82,6 +82,8 @@ function buildApp(walletsRepo: WalletWatchlistRepo, watchlistCache: WatchlistCac
     walletsRepo,
     watchlistCache,
     adminApiKey: ADMIN_KEY,
+    countActiveCandidates: () => 0,
+    getDexScreenerStatus: () => "ok",
   });
 }
 

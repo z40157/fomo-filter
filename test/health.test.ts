@@ -20,11 +20,12 @@ function fakeWatchlistCache(watchedWallets: number): WatchlistCache {
     lookup: () => undefined,
     refresh: async () => {},
     size: () => watchedWallets,
+    entries: () => [],
   };
 }
 
 describe("GET /health", () => {
-  it("returns 200 with real watcher/database/tokens/wallets status", async () => {
+  it("returns 200 with real watcher/database/tokens/wallets/candidate status", async () => {
     const app = buildServer({
       logger: createLogger("silent"),
       chainId: 4663,
@@ -34,6 +35,8 @@ describe("GET /health", () => {
       walletsRepo: fakeWalletsRepo(),
       watchlistCache: fakeWatchlistCache(3),
       adminApiKey: "test-admin-key",
+      countActiveCandidates: () => 12,
+      getDexScreenerStatus: () => "ok",
     });
 
     const response = await app.inject({ method: "GET", url: "/health" });
@@ -47,6 +50,8 @@ describe("GET /health", () => {
       database: "ok",
       trackedTokens: 7,
       watchedWallets: 3,
+      activeCandidates: 12,
+      dexscreenerStatus: "ok",
     });
 
     await app.close();
@@ -62,6 +67,8 @@ describe("GET /health", () => {
       walletsRepo: fakeWalletsRepo(),
       watchlistCache: fakeWatchlistCache(0),
       adminApiKey: "test-admin-key",
+      countActiveCandidates: () => 0,
+      getDexScreenerStatus: () => "down",
     });
 
     const response = await app.inject({ method: "GET", url: "/health" });
@@ -74,6 +81,8 @@ describe("GET /health", () => {
       database: "error",
       trackedTokens: 0,
       watchedWallets: 0,
+      activeCandidates: 0,
+      dexscreenerStatus: "down",
     });
 
     await app.close();

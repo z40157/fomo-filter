@@ -16,6 +16,15 @@ const envSchema = z.object({
   TELEGRAM_BOT_TOKEN: z.string().optional(),
   TELEGRAM_CHAT_ID: z.string().optional(),
   ADMIN_API_KEY: z.string().optional(),
+  // Optional: without it, scripts/verifyWallets.ts falls back to Mobula's
+  // public demo API (rate-limited, "for testing only" per their docs).
+  MOBULA_API_KEY: z.string().optional(),
+  // Candidate tracker tuning — all optional, defaults live in
+  // market/candidateTrackerLogic.ts's DEFAULT_TRACKER_CONFIG.
+  CANDIDATE_ACTIVE_REFRESH_MS: z.coerce.number().int().positive().optional(),
+  CANDIDATE_INACTIVE_REFRESH_MS: z.coerce.number().int().positive().optional(),
+  CANDIDATE_MIN_TRACKING_HOURS: z.coerce.number().positive().optional(),
+  CANDIDATE_EXIT_INACTIVITY_HOURS: z.coerce.number().positive().optional(),
   LOG_LEVEL: z
     .enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"])
     .default("info"),

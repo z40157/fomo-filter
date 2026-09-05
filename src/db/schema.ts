@@ -1,6 +1,7 @@
 import {
   bigint,
   boolean,
+  index,
   integer,
   numeric,
   pgEnum,
@@ -99,10 +100,30 @@ export const walletWatchlist = pgTable("wallet_watchlist", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 });
 
-export const tokenSnapshots = pgTable("token_snapshots", {
-  id: serial("id").primaryKey(),
-  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-});
+// Periodic DexScreener market-data snapshots per token. Grows without
+// bound in V1 (no retention/cleanup implemented yet) — see PROGRESS.md for
+// the estimated growth rate and future cleanup options.
+export const tokenSnapshots = pgTable(
+  "token_snapshots",
+  {
+    id: serial("id").primaryKey(),
+    tokenId: integer("token_id")
+      .notNull()
+      .references(() => tokens.id),
+    // USD price, up to 18 decimal places — meme-coin prices routinely go
+    // well below $0.0001.
+    price: numeric("price", { precision: 38, scale: 18 }),
+    marketCap: numeric("market_cap", { precision: 38, scale: 2 }),
+    liquidity: numeric("liquidity", { precision: 38, scale: 2 }),
+    volume5m: numeric("volume_5m", { precision: 38, scale: 2 }),
+    volume1h: numeric("volume_1h", { precision: 38, scale: 2 }),
+    buys5m: integer("buys_5m"),
+    sells5m: integer("sells_5m"),
+    snapshotAt: timestamp("snapshot_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [index("token_snapshots_token_id_snapshot_at_idx").on(table.tokenId, table.snapshotAt)],
+);
 
 export const signals = pgTable("signals", {
   id: serial("id").primaryKey(),

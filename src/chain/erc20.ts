@@ -27,6 +27,16 @@ const ERC20_METADATA_ABI = [
   },
 ] as const;
 
+const ERC20_DECIMALS_ABI = [
+  {
+    type: "function",
+    name: "decimals",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ type: "uint8" }],
+  },
+] as const;
+
 export interface TokenMetadata {
   name: string | null;
   symbol: string | null;
@@ -61,4 +71,29 @@ export async function resolveTokenMetadata(
   ]);
 
   return { name, symbol };
+}
+
+/**
+ * Best-effort ERC-20 `decimals()` lookup, used only for USD-value
+ * enrichment (converting a trade's raw base-unit tokenAmount into human
+ * units before multiplying by a DexScreener price). Null on failure —
+ * callers must skip enrichment rather than assume 18, since it's the one
+ * thing that would silently make a USD figure wrong by orders of magnitude.
+ */
+export async function resolveTokenDecimals(
+  client: MinimalReadClient,
+  tokenAddress: `0x${string}`,
+  logger: Logger,
+): Promise<number | null> {
+  try {
+    const value = await client.readContract({
+      address: tokenAddress,
+      abi: ERC20_DECIMALS_ABI,
+      functionName: "decimals",
+    });
+    return typeof value === "number" ? value : typeof value === "bigint" ? Number(value) : null;
+  } catch (err) {
+    logger.warn({ err, tokenAddress }, "failed to read ERC20 decimals()");
+    return null;
+  }
 }

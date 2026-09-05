@@ -5,3 +5,5 @@ dist/
 coverage/
 .DS_Store
 data/wallets.json
+data/mined_wallets.json
+data/mobula_cache.json

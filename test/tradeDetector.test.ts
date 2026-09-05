@@ -72,6 +72,21 @@ function fakeTradesRepo(): TradesRepo & { rows: NewTrade[] } {
     async countTrades() {
       return rows.length;
     },
+    async listPendingUsdValue() {
+      return [];
+    },
+    async setUsdValue() {
+      // not exercised by these tests
+    },
+    async listByTokenAndWallets() {
+      return [];
+    },
+    async countBuysByWallet() {
+      return new Map();
+    },
+    async lastTradeAtByToken() {
+      return new Map();
+    },
   };
 }
 
@@ -79,10 +94,12 @@ function dopplerToken(overrides: Partial<TrackedToken> = {}): TrackedToken {
   return {
     id: 1,
     address: DOPPLER_ASSET,
+    symbol: "TEST",
     launchSource: "doppler",
     pairToken: NATIVE,
     pool: DOPPLER_ASSET,
     launchBlock: 100n,
+    launchTime: new Date("2026-01-01T00:00:00Z"),
     initializer: DOPPLER_INITIALIZER,
     poolId: null,
     ...overrides,
@@ -93,10 +110,12 @@ function ponsToken(overrides: Partial<TrackedToken> = {}): TrackedToken {
   return {
     id: 2,
     address: PONS_ASSET,
+    symbol: "PONS",
     launchSource: "pons_v1",
     pairToken: PONS_PAIR,
     pool: PONS_POOL,
     launchBlock: 200n,
+    launchTime: new Date("2026-01-01T00:00:00Z"),
     initializer: null,
     poolId: null,
     ...overrides,
@@ -172,6 +191,7 @@ function fakeWatchlistCache(entries: WalletEntry[] = []): WatchlistCache {
     lookup: (address) => byAddress.get(address.toLowerCase()),
     refresh: async () => {},
     size: () => byAddress.size,
+    entries: () => [...byAddress.values()],
   };
 }
 

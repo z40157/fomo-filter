@@ -7,6 +7,8 @@ export interface WatchlistCache {
   /** Reloads the cache from the DB — call after any watchlist write. */
   refresh(): Promise<void>;
   size(): number;
+  /** All currently-cached (enabled) entries — e.g. to build a `wallet = ANY(...)` SQL filter. */
+  entries(): WalletEntry[];
 }
 
 /**
@@ -33,13 +35,17 @@ export function createWatchlistCache(repo: WalletWatchlistRepo, logger: Logger):
     size() {
       return byAddress.size;
     },
+
+    entries() {
+      return [...byAddress.values()];
+    },
   };
 }
 
 /**
  * Counts distinct real-world owners rather than raw addresses — the whole
  * point of `ownerGroup` is that one person running N wallets must count as
- * 1, not N, for resonance/co-buy detection (Phase 5).
+ * 1, not N, for resonance/co-buy detection (Phase 6).
  */
 export function countDistinctOwnerGroups(wallets: Pick<WalletEntry, "ownerGroup">[]): number {
   return new Set(wallets.map((wallet) => wallet.ownerGroup)).size;
