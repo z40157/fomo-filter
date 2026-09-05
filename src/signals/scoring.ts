@@ -10,6 +10,16 @@
 export const IMPORTANCE_MIN = 1.0;
 export const IMPORTANCE_MAX = 10.0;
 
+// Version of the scoring ruleset below. Phase 9's Outcome Tracker snapshots
+// this alongside every tracked signal's score_breakdown, so an outcome
+// analysis months from now can always say which ruleset produced a given
+// score. **Bump this by 1 whenever any threshold, weight, or dimension
+// formula in this file changes** — old signals keep their recorded version,
+// so their breakdowns stay interpretable under the rules that actually
+// scored them, and analysis can segment by ruleset instead of silently
+// mixing incompatible scores.
+export const SCORING_RULE_VERSION = 1;
+
 const RESONANCE_MAX = 3.0;
 const FLOW_MAX = 2.0;
 const ACCELERATION_MAX = 2.0;

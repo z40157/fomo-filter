@@ -25,6 +25,7 @@ import { computeConfidence, computeImportanceScore, type SnapshotPoint } from ".
 import { computeRisk } from "./risk.js";
 import { formatUsd } from "../format.js";
 import type { AlertDispatcher, AlertDispatchInput } from "../alerts/alertDispatcher.js";
+import type { OutcomeTracker } from "../outcomes/outcomeTracker.js";
 
 const DEFAULT_CLEANUP_INTERVAL_MS = 60_000;
 const RECENT_SNAPSHOTS_FOR_TREND = 5;
@@ -81,6 +82,8 @@ export interface ResonanceDetectorDeps {
   officialStockTokens?: ReadonlySet<string>;
   /** Phase 8: fires email/Telegram alerts for signals that clear the importance threshold and dedup rules — undefined means alerting is off entirely (never crashes or blocks signal persistence either way). */
   alertDispatcher?: AlertDispatcher;
+  /** Phase 9: records a baseline + schedules +5m/+15m/+1h/+6h/+24h outcome samples for any signal scoring >= 6.0 — undefined means outcome tracking is off. Best-effort; never blocks or throws into the signal path. */
+  outcomeTracker?: Pick<OutcomeTracker, "onSignalCreated">;
   now?: () => Date;
   cleanupIntervalMs?: number;
 }
@@ -266,6 +269,24 @@ export function createResonanceDetector(deps: ResonanceDetectorDeps): ResonanceD
         );
       } catch (err) {
         deps.logger.error({ err, signalId, token: event.tokenAddress }, "failed to persist signal wallet breakdown");
+      }
+
+      // Phase 9: outcome tracking — best-effort. onSignalCreated already
+      // catches everything internally; this guard is belt-and-suspenders so
+      // a misbehaving double can never turn it into a lost signal.
+      try {
+        await deps.outcomeTracker?.onSignalCreated({
+          signalId,
+          tokenId: event.tokenId,
+          tokenAddress: event.tokenAddress,
+          importanceScore,
+          riskLevel,
+          confidence: confidenceLevel,
+          scoreBreakdown,
+          triggeredAt: nowDate,
+        });
+      } catch (err) {
+        deps.logger.error({ err, signalId, token: event.tokenAddress }, "outcome tracker onSignalCreated threw unexpectedly — signal is already persisted");
       }
 
       deps.logger.info(

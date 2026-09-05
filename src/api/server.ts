@@ -20,6 +20,8 @@ export interface AppContext {
   getDexScreenerStatus: () => DexScreenerStatus;
   countSignalsToday: () => Promise<number>;
   getLastSignalAt: () => Promise<Date | null>;
+  countTrackedOutcomes: () => Promise<number>;
+  countPendingOutcomePoints: () => Promise<number>;
 }
 
 export function buildServer(ctx: AppContext) {

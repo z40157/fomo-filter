@@ -86,6 +86,8 @@ function buildApp(walletsRepo: WalletWatchlistRepo, watchlistCache: WatchlistCac
     getDexScreenerStatus: () => "ok",
     countSignalsToday: async () => 0,
     getLastSignalAt: async () => null,
+    countTrackedOutcomes: async () => 0,
+    countPendingOutcomePoints: async () => 0,
   });
 }
 

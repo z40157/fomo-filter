@@ -39,6 +39,8 @@ describe("GET /health", () => {
       getDexScreenerStatus: () => "ok",
       countSignalsToday: async () => 5,
       getLastSignalAt: async () => new Date("2026-01-01T00:00:00.000Z"),
+      countTrackedOutcomes: async () => 4,
+      countPendingOutcomePoints: async () => 9,
     });
 
     const response = await app.inject({ method: "GET", url: "/health" });
@@ -56,6 +58,8 @@ describe("GET /health", () => {
       dexscreenerStatus: "ok",
       signalsToday: 5,
       lastSignalAt: "2026-01-01T00:00:00.000Z",
+      trackedOutcomes: 4,
+      pendingOutcomePoints: 9,
     });
 
     await app.close();
@@ -75,6 +79,8 @@ describe("GET /health", () => {
       getDexScreenerStatus: () => "down",
       countSignalsToday: async () => 0,
       getLastSignalAt: async () => null,
+      countTrackedOutcomes: async () => 0,
+      countPendingOutcomePoints: async () => 0,
     });
 
     const response = await app.inject({ method: "GET", url: "/health" });
@@ -91,6 +97,8 @@ describe("GET /health", () => {
       dexscreenerStatus: "down",
       signalsToday: 0,
       lastSignalAt: null,
+      trackedOutcomes: 0,
+      pendingOutcomePoints: 0,
     });
 
     await app.close();

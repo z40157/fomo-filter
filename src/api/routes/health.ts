@@ -14,17 +14,22 @@ interface HealthResponse {
   dexscreenerStatus: DexScreenerStatus;
   signalsToday: number;
   lastSignalAt: string | null;
+  trackedOutcomes: number;
+  pendingOutcomePoints: number;
 }
 
 export function healthRoutes(ctx: AppContext) {
   return async function registerHealthRoutes(app: FastifyInstance): Promise<void> {
     app.get("/health", async (): Promise<HealthResponse> => {
-      const [database, trackedTokens, signalsToday, lastSignalAt] = await Promise.all([
-        ctx.checkDatabase(),
-        ctx.countTrackedTokens(),
-        ctx.countSignalsToday(),
-        ctx.getLastSignalAt(),
-      ]);
+      const [database, trackedTokens, signalsToday, lastSignalAt, trackedOutcomes, pendingOutcomePoints] =
+        await Promise.all([
+          ctx.checkDatabase(),
+          ctx.countTrackedTokens(),
+          ctx.countSignalsToday(),
+          ctx.getLastSignalAt(),
+          ctx.countTrackedOutcomes(),
+          ctx.countPendingOutcomePoints(),
+        ]);
       const status = ctx.watcher.getStatus();
 
       return {
@@ -39,6 +44,8 @@ export function healthRoutes(ctx: AppContext) {
         dexscreenerStatus: ctx.getDexScreenerStatus(),
         signalsToday,
         lastSignalAt: lastSignalAt === null ? null : lastSignalAt.toISOString(),
+        trackedOutcomes,
+        pendingOutcomePoints,
       };
     });
   };

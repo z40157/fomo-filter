@@ -6,7 +6,7 @@ and their BUY/SELL trading activity as a data source for a future
 FOMO-detection/alerting system. This file exists so a new session (or a
 human) can get oriented without re-deriving everything from the code.
 
-## Status: Phase 8 complete (2026-09-05)
+## Status: Phase 9 complete (2026-09-05)
 
 - ✅ Phase 0 — Skeleton
 - ✅ Phase 1 — Chain watcher (WS + reconnect + restart recovery)
@@ -22,11 +22,16 @@ human) can get oriented without re-deriving everything from the code.
   retained but disabled by default). **Real send test done 2026-09-05** — 3
   live messages (NORMAL / STRONG / URGENT+UNKNOWN+LOW) delivered to the real
   bot+chat, Telegram accepted the HTML in every one.
-- ⬜ Everything else — `signalOutcomes` table is still placeholder-only (just
-  `id`/`createdAt`). `alerts` was fleshed out in Phase 8, `narrativeFlags` in
-  Phase 7 — neither is a placeholder any more.
+- ✅ Phase 9 — Outcome Tracker (baseline + 5 discrete samples per signal
+  scoring >= 6.0; restart-tolerant DB sweeper; `npm run outcomes:analyze`
+  report). **Real pipeline test done 2026-09-05** — a real signal's 5
+  points were recorded on wall-clock by the real sweeper against live
+  DexScreener; synthetic test rows removed afterwards.
+- ⬜ Everything else — `signal_outcomes` / `signal_outcome_points` were
+  fleshed out in Phase 9; `alerts` in Phase 8; `narrativeFlags` in Phase 7.
+  No placeholder tables remain.
 
-Tests: 242/242 passing (`npm test`). Typecheck clean (`npm run typecheck` and
+Tests: 278/278 passing (`npm test`). Typecheck clean (`npm run typecheck` and
 `npm run typecheck:test`). `npm run build` clean.
 
 ---
@@ -607,6 +612,80 @@ header, body, footer — is worded as "you should buy this".
   `<pre>` score-breakdown block and `<code>`-wrapped CA rendered as
   intended. Sender script was a throwaway (not committed).
 
+### Phase 9 — Outcome Tracker (`src/outcomes/`, `src/db/signalOutcomes.ts`, `scripts/analyzeOutcomes.ts`)
+The system's only mechanism for ever answering "was a 7-point signal
+actually any good?". Records what happened to a signal *after* it fired —
+nothing here is or implies a recommendation, and the analysis script is
+descriptive-only (no "buy above X" logic or wording anywhere).
+
+**Core principle, enforced in code: record `null`, never guess.** A missing
+DexScreener value is written as `null`, never `0` and never a
+carried-forward previous value; a no-baseline outcome is still created but
+flagged so analysis excludes it cleanly.
+
+- **What gets tracked:** every signal with `importanceScore >= 6.0` —
+  deliberately *below* the 7.0 alert threshold, so an eventual "we alerted
+  vs we only dashboarded it" comparison is possible.
+  `resonanceDetector.onWatchlistBuy` calls `outcomeTracker.onSignalCreated`
+  right after the signal + wallets are persisted, in its own try/catch
+  (best-effort — can never block or fail the signal).
+- **Baseline** (captured immediately, from a *fresh* DexScreener fetch so
+  it's measured the same way the later points are): `baseline_price`,
+  `baseline_market_cap`, `baseline_liquidity`, plus the signal's
+  `importance_score` / `risk_level` / `confidence` / full `score_breakdown`
+  snapshot and **`scoring_rule_version`** (see decision #11 below). If
+  DexScreener has nothing, the row is still created with
+  `baseline_available = false`.
+- **Five sample points per outcome:** `+5m / +15m / +1h / +6h / +24h`
+  (`signal_outcome_points`, one row each, created unrecorded). Each records
+  `price / market_cap / liquidity / volume_5m / recorded_at /
+  data_available`, plus derived `return_pct` and `market_cap_change_pct`
+  (percentage vs baseline; **`null` if either side is missing** — never 0),
+  plus **`actual_delay_seconds`** (`recorded_at - due_at`, recorded
+  truthfully) and **`delayed`** (delay over the offset's tolerance — 3 min
+  for +5m, wider for later offsets).
+- **Why a DB sweeper, not per-signal `setTimeout`** (decision #10 below):
+  `outcomeTracker` runs one `setInterval` (30 s default) that reads
+  still-pending points whose `due_at` has passed straight from the DB
+  (`listDuePendingPoints`), fetches current market data, and fills each in.
+  A restart loses nothing — the pending rows are the queue — and it scales
+  to thousands of outstanding points without thousands of live timers. A
+  point missed during downtime is simply recorded late with its real delay.
+- **Summary rollup** (`max_price` / `max_return_pct` / `min_price` /
+  `max_drawdown_pct` on the outcome row): recomputed **from scratch** off
+  all of that outcome's recorded points on every point insert (never
+  incrementally) so it's naturally correct after a restart and can't drift.
+  `max_drawdown_pct` is order-aware (worst drop from the running peak of
+  the points seen so far). **These are over 5 discrete samples, not a
+  continuous price feed** — the true intra-sample high/low is never
+  observed, and both the column comments and the analysis report say so.
+- **`npm run outcomes:analyze`** (`scripts/analyzeOutcomes.ts` +
+  `analyzeOutcomesLogic.ts`, the latter pure/tested): console tables of
+  +1h / +24h mean & median return, +24h positive-return share, and avg
+  max-up / max-drawdown, bucketed by importance (`6.0-6.9 / 7.0-7.9 /
+  8.0-8.9 / 9.0+`) and cross-tabbed by risk level and confidence. Rows with
+  `baseline_available = false` are **excluded from every statistic** and
+  counted separately; any group (or the overall report) with fewer than 10
+  data-complete outcomes is loudly flagged as a pipeline smoke test, not a
+  finding.
+- **`GET /health`** gains `trackedOutcomes` (outcomes with >= 1 unrecorded
+  point) and `pendingOutcomePoints` (all unrecorded points).
+- **Schedule override for testing:** `OUTCOME_OFFSETS_MS` (5 comma-sep ms
+  values, labels stay fixed) + `OUTCOME_SWEEP_INTERVAL_MS`. Not for
+  production use — `index.ts` logs a warning when the override is active.
+- **Real pipeline test (2026-09-05):** inserted one real `signals` row
+  (score 6.20) for a real token DexScreener covers, ran the tracker with
+  20/40/60/90/120-second offsets and the real `setInterval` sweeper
+  (10 s) against the live DexScreener API. All 5 points recorded on
+  wall-clock as each came due, every one `data_available = true`,
+  `actual_delay_seconds = 1`, `delayed = false`. The token's price was
+  genuinely flat across the ~2-minute window so `return_pct` came back
+  `0.0000` for every point (real data — the returnPct math handled a
+  zero delta correctly, it didn't fabricate movement). `npm run
+  outcomes:analyze` then printed the expected `n<10` warning banner. The
+  synthetic signal + its outcome/points were deleted afterwards so the
+  outcomes tables hold only genuine data.
+
 ---
 
 ## Key technical decisions (read this before touching trade detection)
@@ -801,6 +880,48 @@ instruction to only document the plan, not build it):
   already supports the query shapes a cleanup job would need (per-token
   time-range scans), so no schema rework is required to add this later.
 
+### 10. Outcome tracking is a DB sweeper, never per-signal `setTimeout`
+Each tracked signal needs samples at +5m/+15m/+1h/+6h/+24h. The obvious
+implementation — schedule five `setTimeout`s when the signal fires — is
+wrong on two counts, both of which actually bite this project:
+- **A restart loses every pending timer.** Signals fire around the clock;
+  the process restarts for deploys, RPC flaps, crashes. In-memory timers
+  would silently drop all outstanding +6h/+24h samples on every restart,
+  which is exactly the data an outcome analysis needs most.
+- **It doesn't scale.** A busy day produces many signals; five live timers
+  each, held for 24h, is thousands of concurrent timers doing nothing 99%
+  of the time.
+Instead: `signal_outcome_points` rows ARE the queue. `onSignalCreated`
+writes five unrecorded rows with their `due_at`. One `setInterval` (30s)
+reads the still-pending, now-due rows straight from the DB
+(`listDuePendingPoints`), records them, done. A restart resumes from the
+table with nothing lost; a point missed during downtime is recorded late
+with a truthful `actual_delay_seconds` and `delayed = true`. The summary
+metrics are recomputed from scratch from all recorded points on every
+insert, so they're correct regardless of restarts or out-of-order sweeps.
+
+### 11. `scoring_rule_version` — bump it whenever `scoring.ts` rules change
+`signals/scoring.ts` exports `SCORING_RULE_VERSION` (currently `1`). Every
+tracked outcome snapshots both the full `score_breakdown` **and** this
+integer at capture time. The scoring thresholds/weights *will* be tuned
+once there's real outcome data to tune against — when they are, that's a
+**new ruleset**: bump `SCORING_RULE_VERSION`, don't edit history. Old
+outcomes keep their recorded version and stay interpretable under the
+rules that actually scored them, and `outcomes:analyze` can segment by
+ruleset instead of silently averaging together scores that don't mean the
+same thing. Forgetting to bump it is the one way this feature quietly
+produces a misleading analysis months from now.
+
+### 12. Outcome max-return / max-drawdown are over 5 discrete samples, not a price curve
+`signal_outcomes.max_return_pct` / `max_drawdown_pct` (and `max_price` /
+`min_price`) are computed **only from the +5m/+15m/+1h/+6h/+24h samples we
+actually took**. A token can 10x and fully round-trip between +1h and +6h
+and this system will never see it. The column comments, the analysis
+report header, and any future consumer must treat these as "best/worst of
+the sampled points", never "the real peak/trough". Denser sampling would
+mean more DexScreener calls against a shared 50/min limiter — deliberately
+out of scope for V1.
+
 ---
 
 ## Confirmed contract addresses (chainId 4663) and their source
@@ -923,7 +1044,17 @@ amount exactly).
   by an order of magnitude.
 
 ## Next planned phase
-Phase 9 — Outcome Tracker, which will need Phase 7's exact scoring rules
-to be traceable after the fact (see the Phase 7 section above — the full
-rule definitions are kept versioned there for that reason) and Phase 8's
-`alerts` rows as its input of "what we told a human to look at, and when."
+Phases 0-9 are complete. The system now records signals, scores/grades
+them, alerts on the strong ones, and tracks how each one played out.
+
+The immediate next step isn't code — it's **letting outcome data
+accumulate**. `outcomes:analyze` needs on the order of tens of
+data-complete outcomes per importance bucket before its numbers mean
+anything (it says so itself, loudly, below that threshold). Once there's a
+real sample, the scoring thresholds in `signals/scoring.ts` can be tuned
+against it — and when they are, bump `SCORING_RULE_VERSION` (decision #11).
+
+Possible later work, none scoped yet: a dashboard over the `alerts` /
+`signal_outcomes` tables; `token_snapshots` retention (decision #9);
+historical Pons launch backfill; denser outcome sampling if the discrete
+5-point limitation (decision #12) proves too coarse.

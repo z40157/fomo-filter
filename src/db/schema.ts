@@ -231,10 +231,107 @@ export const alerts = pgTable(
   (table) => [index("alerts_token_id_channel_sent_at_idx").on(table.tokenId, table.channel, table.sentAt)],
 );
 
-export const signalOutcomes = pgTable("signal_outcomes", {
-  id: serial("id").primaryKey(),
-  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-});
+// Phase 9 — Outcome Tracker. The system's only mechanism for ever
+// answering "was a 7-point signal actually any good?". One row per tracked
+// signal (importanceScore >= 6.0 — note: BELOW the 7.0 alert threshold, so
+// "we alerted vs we didn't" stays analysable), holding the baseline
+// captured at signal time plus discrete-sample summary metrics that
+// `signal_outcome_points` rows roll up into.
+//
+// **Data honesty rule for this whole feature: record null, never guess.**
+// If DexScreener had no data at signal time, the row is still created but
+// `baseline_available = false` so analysis can exclude it cleanly.
+export const signalOutcomes = pgTable(
+  "signal_outcomes",
+  {
+    id: serial("id").primaryKey(),
+    signalId: integer("signal_id")
+      .notNull()
+      .references(() => signals.id),
+    tokenId: integer("token_id")
+      .notNull()
+      .references(() => tokens.id),
+    baselineAt: timestamp("baseline_at", { withTimezone: true }).notNull(),
+    // Captured from a fresh DexScreener fetch at signal-creation time. Null
+    // when DexScreener had nothing for this token yet.
+    baselinePrice: numeric("baseline_price", { precision: 38, scale: 18 }),
+    baselineMarketCap: numeric("baseline_market_cap", { precision: 38, scale: 2 }),
+    baselineLiquidity: numeric("baseline_liquidity", { precision: 38, scale: 2 }),
+    // false iff baselinePrice is null — the flag analysis filters on so a
+    // no-baseline row never pollutes a returnPct statistic.
+    baselineAvailable: boolean("baseline_available").notNull(),
+    // Snapshot of the signal's rating at trigger time — copied here so an
+    // outcome analysis doesn't have to join back to a `signals` row that
+    // may have been scored under a since-changed ruleset.
+    importanceScore: numeric("importance_score", { precision: 4, scale: 2 }).notNull(),
+    riskLevel: riskLevelEnum("risk_level"),
+    confidence: confidenceLevelEnum("confidence"),
+    scoreBreakdown: jsonb("score_breakdown").notNull(),
+    // signals/scoring.ts's SCORING_RULE_VERSION at capture time. Bumped
+    // whenever the scoring rules change; lets analysis segment by ruleset.
+    scoringRuleVersion: integer("scoring_rule_version").notNull(),
+    // Rolled up from signal_outcome_points as they are recorded. All
+    // derived from the 5 DISCRETE sample points only — NOT a continuous
+    // price feed, so the true peak/trough between two samples is never
+    // observed. Null until at least one point with usable data exists.
+    maxPrice: numeric("max_price", { precision: 38, scale: 18 }),
+    // Highest returnPct (%) seen at any sampled point, vs baseline.
+    maxReturnPct: numeric("max_return_pct", { precision: 16, scale: 4 }),
+    minPrice: numeric("min_price", { precision: 38, scale: 18 }),
+    // Worst peak-to-trough drop (%) across sampled points, measured from
+    // the running max of the points seen so far (order-aware). Negative.
+    maxDrawdownPct: numeric("max_drawdown_pct", { precision: 16, scale: 4 }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    unique("signal_outcomes_signal_id_unique").on(table.signalId),
+    index("signal_outcomes_importance_idx").on(table.importanceScore),
+    index("signal_outcomes_risk_confidence_idx").on(table.riskLevel, table.confidence),
+    index("signal_outcomes_baseline_available_idx").on(table.baselineAvailable),
+  ],
+);
+
+// One row per (signal outcome, tracking offset). Five per outcome:
+// +5m / +15m / +1h / +6h / +24h. Created unrecorded at signal time; a
+// restart-tolerant sweeper fills each in once `due_at` passes by reading
+// the still-pending rows straight from this table (never an in-memory
+// setTimeout — those don't survive a restart and don't scale).
+export const signalOutcomePoints = pgTable(
+  "signal_outcome_points",
+  {
+    id: serial("id").primaryKey(),
+    signalOutcomeId: integer("signal_outcome_id")
+      .notNull()
+      .references(() => signalOutcomes.id),
+    // "5m" | "15m" | "1h" | "6h" | "24h" — a stable label, not a duration,
+    // so shrinking the offsets for a test doesn't invalidate old rows.
+    offsetLabel: varchar("offset_label", { length: 8 }).notNull(),
+    dueAt: timestamp("due_at", { withTimezone: true }).notNull(),
+    // Null until the sweeper records this point.
+    recordedAt: timestamp("recorded_at", { withTimezone: true }),
+    // Whether DexScreener actually returned data at record time. Null until recorded.
+    dataAvailable: boolean("data_available"),
+    price: numeric("price", { precision: 38, scale: 18 }),
+    marketCap: numeric("market_cap", { precision: 38, scale: 2 }),
+    liquidity: numeric("liquidity", { precision: 38, scale: 2 }),
+    volume5m: numeric("volume_5m", { precision: 38, scale: 2 }),
+    // (%) vs the outcome's baseline. Null if EITHER side is missing — never 0.
+    returnPct: numeric("return_pct", { precision: 16, scale: 4 }),
+    marketCapChangePct: numeric("market_cap_change_pct", { precision: 16, scale: 4 }),
+    // recordedAt - dueAt, in seconds. Recorded truthfully even when a
+    // restart meant a +5m point was actually taken at +8m.
+    actualDelaySeconds: integer("actual_delay_seconds"),
+    // actualDelaySeconds over this offset's tolerance (see outcomeTrackerLogic.ts).
+    delayed: boolean("delayed"),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    unique("signal_outcome_points_outcome_offset_unique").on(table.signalOutcomeId, table.offsetLabel),
+    // The sweeper's hot query: still-pending points whose due_at has passed.
+    index("signal_outcome_points_pending_idx").on(table.recordedAt, table.dueAt),
+  ],
+);
 
 // Manually-curated narrative boost per token — V1 does no AI narrative
 // analysis (see signals/scoring.ts's Dimension E). A human sets `boost`

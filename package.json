@@ -19,7 +19,8 @@
     "db:migrate": "drizzle-kit migrate",
     "wallets:import": "tsx --env-file-if-exists=.env src/scripts/importWallets.ts",
     "wallets:mine": "tsx --env-file-if-exists=.env scripts/mineWallets.ts",
-    "wallets:verify": "tsx --env-file-if-exists=.env scripts/verifyWallets.ts"
+    "wallets:verify": "tsx --env-file-if-exists=.env scripts/verifyWallets.ts",
+    "outcomes:analyze": "tsx --env-file-if-exists=.env scripts/analyzeOutcomes.ts"
   },
   "dependencies": {
     "drizzle-orm": "^0.36.4",

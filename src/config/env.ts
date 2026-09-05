@@ -29,6 +29,13 @@ const envSchema = z.object({
   // signals/resonanceLogic.ts's DEFAULT_RESONANCE_CONFIG.
   RESONANCE_WINDOW_MINUTES: z.coerce.number().positive().optional(),
   RESONANCE_COOLDOWN_MINUTES: z.coerce.number().positive().optional(),
+  // Outcome tracker (Phase 9) — all optional, defaults in
+  // outcomes/outcomeTrackerLogic.ts. OUTCOME_OFFSETS_MS is a comma-separated
+  // list of exactly 5 millisecond values (for +5m/+15m/+1h/+6h/+24h, in
+  // order) — ONLY for shortening the schedule during a live pipeline test;
+  // the label set stays fixed.
+  OUTCOME_SWEEP_INTERVAL_MS: z.coerce.number().int().positive().optional(),
+  OUTCOME_OFFSETS_MS: z.string().optional(),
   LOG_LEVEL: z
     .enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"])
     .default("info"),

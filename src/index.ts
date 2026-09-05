@@ -24,12 +24,42 @@ import { createErc20DecimalsResolver, createUsdEnrichmentJob } from "./market/us
 import { resolveTokenMetadata } from "./chain/erc20.js";
 import { createResonanceDetector } from "./signals/resonanceDetector.js";
 import type { ResonanceConfig } from "./signals/resonanceLogic.js";
+import { SCORING_RULE_VERSION } from "./signals/scoring.js";
+import { createSignalOutcomesRepo } from "./db/signalOutcomes.js";
+import { createOutcomeTracker } from "./outcomes/outcomeTracker.js";
+import { DEFAULT_OUTCOME_OFFSETS, type OutcomeOffset } from "./outcomes/outcomeTrackerLogic.js";
 import { createAlertDispatcher } from "./alerts/alertDispatcher.js";
 import { createResendClient } from "./alerts/resendClient.js";
 import { createTelegramClient } from "./alerts/telegramClient.js";
 
 const WATCHLIST_REFRESH_INTERVAL_MS = 60_000;
 const USD_ENRICHMENT_INTERVAL_MS = 30_000;
+const OUTCOME_SWEEP_INTERVAL_MS = 30_000;
+
+/**
+ * Parse OUTCOME_OFFSETS_MS ("ms,ms,ms,ms,ms") into the tracker's offset
+ * table, keeping the fixed +5m/+15m/+1h/+6h/+24h label set. Only for a
+ * live pipeline test where waiting a real day isn't practical — returns
+ * undefined (use production defaults) when unset or malformed.
+ */
+function outcomeOffsetsFromEnv(raw: string | undefined, logger: ReturnType<typeof createLogger>): readonly OutcomeOffset[] | undefined {
+  if (!raw) return undefined;
+  const parts = raw.split(",").map((s) => Number(s.trim()));
+  if (parts.length !== DEFAULT_OUTCOME_OFFSETS.length || parts.some((n) => !Number.isFinite(n) || n <= 0)) {
+    logger.warn(
+      { raw },
+      `OUTCOME_OFFSETS_MS must be ${DEFAULT_OUTCOME_OFFSETS.length} positive numbers — ignoring it and using production offsets`,
+    );
+    return undefined;
+  }
+  const overridden = DEFAULT_OUTCOME_OFFSETS.map((o, i) => ({
+    label: o.label,
+    ms: parts[i]!,
+    delayToleranceMs: Math.max(10_000, Math.round(parts[i]! / 2)),
+  }));
+  logger.warn({ offsetsMs: parts }, "OUTCOME_OFFSETS_MS override active — outcome schedule is NOT production timing");
+  return overridden;
+}
 
 function trackerConfigFromEnv(env: {
   CANDIDATE_ACTIVE_REFRESH_MS?: number;
@@ -92,6 +122,7 @@ async function main(): Promise<void> {
   const signalsRepo = createSignalsRepo(db);
   const narrativeFlagsRepo = createNarrativeFlagsRepo(db);
   const alertsRepo = createAlertsRepo(db);
+  const signalOutcomesRepo = createSignalOutcomesRepo(db);
   const watchlistCache = createWatchlistCache(walletsRepo, logger);
   const officialStockTokens = loadOfficialStockTokens(logger);
   const httpClient = createHttpClient(env.RH_RPC_HTTP);
@@ -171,11 +202,24 @@ async function main(): Promise<void> {
     return symbol;
   }
 
+  // Phase 9: Outcome Tracker — records what happened to every signal
+  // scoring >= 6.0 at +5m/+15m/+1h/+6h/+24h. Uses a restart-tolerant DB
+  // sweep (not per-signal timers). Reuses the shared `dexscreener` client
+  // so its calls go through the same rate limiter as candidateTracker.
+  const outcomeTracker = createOutcomeTracker({
+    outcomesRepo: signalOutcomesRepo,
+    marketSource: dexscreener,
+    scoringRuleVersion: SCORING_RULE_VERSION,
+    logger,
+    offsets: outcomeOffsetsFromEnv(env.OUTCOME_OFFSETS_MS, logger),
+  });
+
   const resonanceDetector = createResonanceDetector({
     signalsRepo,
     logger,
     config: resonanceConfigFromEnv(env),
     getQuoteTokenSymbol,
+    outcomeTracker,
     getMarketSnapshot: (tokenId) => candidateTracker.getLatestMarketSnapshot(tokenId),
     getWatchedFlowState: (tokenId) => candidateTracker.getAggregateState(tokenId),
     getRecentSnapshots: (tokenId, limit) => snapshotsRepo.listRecent(tokenId, limit),
@@ -240,6 +284,10 @@ async function main(): Promise<void> {
   });
   usdEnrichmentJob.start(USD_ENRICHMENT_INTERVAL_MS);
 
+  // Phase 9: the outcome sweeper — fills in due-and-pending outcome points
+  // from the DB on its own timer, fully decoupled from signal generation.
+  outcomeTracker.start(env.OUTCOME_SWEEP_INTERVAL_MS ?? OUTCOME_SWEEP_INTERVAL_MS);
+
   const app = buildServer({
     logger,
     chainId: CHAIN_ID,
@@ -257,6 +305,8 @@ async function main(): Promise<void> {
       return signalsRepo.countSince(startOfDay);
     },
     getLastSignalAt: () => signalsRepo.lastTriggeredAt(),
+    countTrackedOutcomes: () => signalOutcomesRepo.countTracked(),
+    countPendingOutcomePoints: () => signalOutcomesRepo.countPendingPoints(),
   });
 
   try {
