@@ -351,25 +351,47 @@ async function main(): Promise<void> {
   // Railway sends SIGTERM on every redeploy. Without a clean shutdown, each
   // deploy leaves a dangling DB connection and an unclosed WS subscription —
   // Railway Postgres's max_connections isn't high, and a few deploys in a
-  // row would exhaust it. Stops every background loop's own timer first (via
-  // their existing stop() methods — nothing new added to those modules),
-  // then the HTTP server, then the DB pool last.
+  // row would exhaust it. Order: stop accepting new HTTP requests first,
+  // then every background loop via its existing stop() method (nothing new
+  // added to those modules — this only calls what they already expose),
+  // then the DB pool last. watchlistCache's own refresh setInterval has no
+  // stop() and isn't called here — it's .unref()'d (see its call site
+  // above), so it never keeps the process alive and needs no explicit
+  // teardown; process.exit() below ends it regardless.
+  const SHUTDOWN_TIMEOUT_MS = 15_000;
   let shuttingDown = false;
   async function shutdown(signal: string): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
-    logger.info({ signal }, "received shutdown signal, shutting down gracefully");
+    logger.info({ signal }, "shutdown requested");
+
+    const timeout = setTimeout(() => {
+      logger.error({ timeoutMs: SHUTDOWN_TIMEOUT_MS }, "graceful shutdown timed out, forcing exit");
+      process.exit(1);
+    }, SHUTDOWN_TIMEOUT_MS);
+    timeout.unref();
+
     try {
+      logger.info("stopping http server");
+      await app.close();
+
+      logger.info("stopping chain watcher");
       watcher.stop();
-      resonanceDetector.stop();
+
+      logger.info("stopping background jobs");
       candidateTracker.stop();
       usdEnrichmentJob.stop();
       outcomeTracker.stop();
-      await app.close();
+      resonanceDetector.stop();
+
+      logger.info("closing database");
       await db.$client.end();
+
+      clearTimeout(timeout);
       logger.info("shutdown complete");
       process.exit(0);
     } catch (err) {
+      clearTimeout(timeout);
       logger.error({ err }, "error during shutdown");
       process.exit(1);
     }

@@ -15,6 +15,12 @@ COPY package.json package-lock.json* ./
 RUN npm install --omit=dev
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/drizzle ./drizzle
+# config/ currently holds only stockTokens.json + its .example — a
+# hand-maintained, git-tracked, non-secret list (empty by default; see
+# scoring.ts's Narrative dimension). Without this, index.ts's read of
+# config/stockTokens.json throws ENOENT in production (caught, degrades to
+# an empty set), silently diverging from dev-environment behavior.
+COPY --from=build /app/config ./config
 EXPOSE 3000
 # Invoke node directly rather than "npm start": npm run as PID 1 does not
 # reliably forward SIGTERM to its child node process (confirmed live —
