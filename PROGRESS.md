@@ -955,6 +955,26 @@ amount exactly).
 
 ## Known limitations / follow-ups
 
+- **Restart-recovery backfill (`ChainWatcher.recover()`) is capped at
+  `maxBackfillBlocks` (default 50,000, ~1h of chain time)** — found 2026-09-07
+  when the service had been down ~43h and tried to backfill ~2.28M blocks one
+  at a time (10 concurrent), which would have blocked startup (and `/health`,
+  and all detection) for hours before ever reaching `app.listen`. Past the
+  cap, it now skips the per-block backfill and the log-range scan entirely
+  and jumps straight to the current head, logging a warning with the skipped
+  range size. This means any gap longer than the cap is genuinely lost —
+  tokens/trades/signals that happened during that window will never be
+  recorded. Fine for this project's actual usage pattern (a long-running
+  process that should rarely restart), not fine if this is ever run somewhere
+  restarts are frequent and gaps regularly exceed the cap.
+- **This RPC plan (QuickNode) rate-limits `eth_getLogs` (429s) under live
+  traffic**, not just during backfill — observed a handful of 429s in the
+  first ~30s after a restart-from-head, tapering off on their own.
+  `ChainWatcher.runOnBlockRange` already swallows `onBlockRange` failures so
+  block tracking isn't blocked, but a block that 429s has its new-token/trade
+  detection silently skipped for that block — a real, if narrow, gap in
+  detection coverage. Not addressed; matches the RPC-plan constraints already
+  noted in decision #4/#5 above.
 - **`drizzle-kit generate` prompts interactively** (not a `--yes`-able flag)
   whenever a table's shape changes enough that it can't tell a dropped+added
   column apart from a rename — this happened converting `wallet_watchlist`
