@@ -6,7 +6,7 @@ and their BUY/SELL trading activity as a data source for a future
 FOMO-detection/alerting system. This file exists so a new session (or a
 human) can get oriented without re-deriving everything from the code.
 
-## Status: Phase 9 complete (2026-09-05)
+## Status: Phase 9 complete (2026-09-05); EIP-7702/EntryPoint wallet fixes + Railway deployment prep done (2026-09-07)
 
 - ✅ Phase 0 — Skeleton
 - ✅ Phase 1 — Chain watcher (WS + reconnect + restart recovery)
@@ -30,8 +30,14 @@ human) can get oriented without re-deriving everything from the code.
 - ⬜ Everything else — `signal_outcomes` / `signal_outcome_points` were
   fleshed out in Phase 9; `alerts` in Phase 8; `narrativeFlags` in Phase 7.
   No placeholder tables remain.
+- ✅ EIP-7702/EntryPoint wallet-attribution fixes (one-off, not a phase) —
+  see its own section below. 249/249 historical `trades.wallet`
+  misattributions corrected (`--apply` run and re-verified: 0 remaining).
+- ✅ Railway deployment prep (one-off, not a phase) — see its own section
+  below. Code-side prep only; live deploy status on Railway's side is
+  unconfirmed from this repo.
 
-Tests: 278/278 passing (`npm test`). Typecheck clean (`npm run typecheck` and
+Tests: 354/354 passing (`npm test`). Typecheck clean (`npm run typecheck` and
 `npm run typecheck:test`). `npm run build` clean.
 
 ---
@@ -686,6 +692,101 @@ flagged so analysis excludes it cleanly.
   synthetic signal + its outcome/points were deleted afterwards so the
   outcomes tables hold only genuine data.
 
+### EIP-7702 wallet-attribution fixes (one-off, not a phase) — 2026-09-07
+Triggered by the FOMO Top100 wallet-verification tool (`scripts/verifyFomoWallets.ts`,
+added earlier as a read-only check): all 72/72 candidate wallets turned out
+to be EIP-7702-delegated to `Simple7702Account`, which exposed two real bugs
+rather than a tool-only quirk.
+
+- **`eth_getCode` misclassification** (`scripts/lib/fomoWalletVerification.ts`):
+  any non-empty bytecode was collapsed into `CONTRACT_OR_SMART_ACCOUNT`,
+  silently swallowing all 72 delegated candidates into that bucket. This
+  made `historicalRpcSupported` always report `UNKNOWN` (the probe only
+  ever looked for an `addressType === "EOA"` candidate, and there were
+  none) and discarded every delegated address's real nonce-based
+  direct-activity data. Fixed with `classifyAddressType` /
+  `parseEip7702Delegate`, matching the exact `0xef0100` + 20-byte
+  delegation-designator pattern (23 bytes), and a new
+  `EIP7702_DELEGATED_EOA` address type routed through the same real
+  nonce analysis as a plain EOA (with an explicit caveat: its nonce also
+  increments on EIP-7702 authorization refreshes, not only sent
+  transactions). **Live-verified**: `historicalRpcSupported` flipped
+  UNKNOWN → SUPPORTED, and 38/72 candidates showed real 30d direct
+  activity that was previously invisible.
+- **`tradeDetector` wallet misattribution** (`src/chain/tradeDetector.ts`):
+  `recordTrade` used `tx.from` unconditionally, which is only correct for
+  a plain EOA-originated trade — for a trade routed through ERC-4337's
+  `EntryPoint` (how the entire FOMO Top100 cohort trades, via their
+  `Simple7702Account`), `tx.from` is just the bundler/relayer's address.
+  Fixed with `resolveTradeWallet`: `handleOps` processes each
+  UserOperation sequentially, so the first `UserOperationEvent` at a
+  higher `logIndex` than a trade log, within the same tx, names the real
+  sender — falling back to plain `tx.from` at zero extra RPC cost when
+  `tx.to` isn't a known EntryPoint (the common case), and flagging
+  (never silently assuming) the rare case where no matching event
+  exists. **Live-verified** against the real DB + RPC: all 4 production
+  rows then misattributed to the shared bundler
+  (`0x43370371e0bb085d04d02a815230aaf67b35ef25`) resolved to distinct
+  real senders, one exactly matching the address independently found by
+  this same investigation.
+- **`scripts/backfillEntryPointWallets.ts`** (one-off, read-only by
+  default, `--apply` gated): re-resolves every historical `trades` row
+  through the same `resolveTradeWallet` logic. Dry-run against
+  production found 11,174 rows checked, 249 routed through a known
+  EntryPoint, all 249 needing correction (0 unresolved, 0 RPC failures) —
+  many distinct bundler addresses beyond the one first spotted, all
+  sharing the `0x4337…` vanity prefix. **`--apply` has since been run**:
+  `trades.wallet` now has zero rows on the old bundler address and zero
+  `0x4337…`-prefixed wallets remain.
+- Net effect: FOMO Top100 wallet activity (both the verification tool's
+  30d stats and `trades.wallet` going forward) reflects real trader
+  addresses, not bundler/relayer addresses or an artificially-empty
+  EOA bucket.
+
+### Railway deployment prep (one-off, not a phase) — 2026-09-07
+No code path exercises this automatically — it's infrastructure, verified
+by build/tests + `docker stop` behavior rather than a test suite.
+
+- **`src/scripts/migrate.ts`** — a production-safe migration runner,
+  deliberately independent of `drizzle-kit` (a devDependency absent from
+  the `npm install --omit=dev` runtime image); uses only `drizzle-orm/pg`.
+  Compiles to `dist/scripts/migrate.js`, run via `npm run db:migrate:prod`,
+  intended as Railway's Pre-Deploy Command. Retries DB connectivity with
+  backoff (same reasoning as the startup wait below) before migrating;
+  always closes its pool in a `finally` so a hung connection can't block
+  Railway's deploy step.
+- **`src/index.ts` startup**: `waitForDatabaseReady` retries
+  `checkDatabase` with backoff for up to ~30s before the app proceeds,
+  since Railway's private-network DNS may not resolve in the first
+  instant a container starts.
+- **`src/index.ts` listen host**: binds `"::"` (IPv6 wildcard, dual-stack)
+  instead of `"0.0.0.0"` — Railway's private networking is IPv6-only.
+- **Graceful shutdown**: Railway sends `SIGTERM` on every redeploy;
+  without a clean shutdown each deploy would leave a dangling DB
+  connection and unclosed WS subscription, and Railway Postgres's
+  `max_connections` isn't high enough to absorb that across repeated
+  deploys. Order on shutdown: stop accepting new HTTP requests
+  (`app.close()`) → stop the chain watcher and every background job's
+  own `stop()` → close the DB pool last, all under a 15s hard timeout
+  that force-exits if graceful shutdown hangs.
+- **`Dockerfile`**: runs `node dist/index.js` directly as PID 1 instead
+  of `npm start` — confirmed live that `npm run` as PID 1 does not
+  reliably forward `SIGTERM` to its child node process (`docker stop`
+  produced `npm error signal SIGTERM`, exit code 1, and none of
+  `index.ts`'s graceful-shutdown log lines appeared). Also now copies
+  `config/` into the runtime image (`config/stockTokens.json` — without
+  it, `index.ts`'s read throws `ENOENT` in production, caught but
+  silently diverging from dev behavior by disabling the Narrative
+  dimension's official-stock-pair bonus). New `.dockerignore` excludes
+  `node_modules`, `.git`, `dist`, `coverage`, `.env*`, `test`, `data`,
+  `outputs`, logs.
+- **Not yet confirmed from this side**: whether the Railway service
+  itself has been created/connected on the account and successfully
+  deployed this image — that step happens in Railway's own
+  dashboard/CLI, outside this repo. Build (`npm run build`) and the full
+  test suite pass locally as of this writing; that's necessary but not
+  sufficient evidence of a live deploy.
+
 ---
 
 ## Key technical decisions (read this before touching trade detection)
@@ -1065,14 +1166,22 @@ amount exactly).
 
 ## Next planned phase
 Phases 0-9 are complete. The system now records signals, scores/grades
-them, alerts on the strong ones, and tracks how each one played out.
+them, alerts on the strong ones, and tracks how each one played out. Since
+Phase 9, two one-off hardening efforts landed (see their sections above):
+EIP-7702/EntryPoint wallet-attribution fixes (2026-09-07) and Railway
+deployment prep (2026-09-07) — build and all 354 tests pass, working tree
+is clean and pushed to `main`. **Whether the Railway service itself is
+actually live is unconfirmed from this side** — that's a step in Railway's
+own dashboard/CLI, outside this repo; confirm with a real deployed URL or
+its `/health` output before treating it as done.
 
-The immediate next step isn't code — it's **letting outcome data
-accumulate**. `outcomes:analyze` needs on the order of tens of
-data-complete outcomes per importance bucket before its numbers mean
-anything (it says so itself, loudly, below that threshold). Once there's a
-real sample, the scoring thresholds in `signals/scoring.ts` can be tuned
-against it — and when they are, bump `SCORING_RULE_VERSION` (decision #11).
+Once deployment is confirmed live, the immediate next step isn't code —
+it's **letting outcome data accumulate**. `outcomes:analyze` needs on the
+order of tens of data-complete outcomes per importance bucket before its
+numbers mean anything (it says so itself, loudly, below that threshold).
+Once there's a real sample, the scoring thresholds in `signals/scoring.ts`
+can be tuned against it — and when they are, bump `SCORING_RULE_VERSION`
+(decision #11).
 
 Possible later work, none scoped yet: a dashboard over the `alerts` /
 `signal_outcomes` tables; `token_snapshots` retention (decision #9);
