@@ -21,7 +21,8 @@
     "wallets:mine": "tsx --env-file-if-exists=.env scripts/mineWallets.ts",
     "wallets:verify": "tsx --env-file-if-exists=.env scripts/verifyWallets.ts",
     "wallets:fomo-verify": "tsx --env-file-if-exists=.env scripts/verifyFomoWallets.ts",
-    "outcomes:analyze": "tsx --env-file-if-exists=.env scripts/analyzeOutcomes.ts"
+    "outcomes:analyze": "tsx --env-file-if-exists=.env scripts/analyzeOutcomes.ts",
+    "trades:backfill-entrypoint-wallets": "tsx --env-file-if-exists=.env scripts/backfillEntryPointWallets.ts"
   },
   "dependencies": {
     "drizzle-orm": "^0.36.4",
