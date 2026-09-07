@@ -1,9 +1,10 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { loadEnv } from "./config/index.js";
-import { createLogger } from "./logger.js";
+import { createLogger, type Logger } from "./logger.js";
 import { buildServer } from "./api/server.js";
-import { createDb, checkDatabase } from "./db/client.js";
+import { createDb, checkDatabase, type Database } from "./db/client.js";
+import { ExponentialBackoff } from "./chain/backoff.js";
 import { createScannerStateRepo } from "./db/scannerState.js";
 import { createTokensRepo } from "./db/tokens.js";
 import { createTradesRepo } from "./db/trades.js";
@@ -90,6 +91,28 @@ function resonanceConfigFromEnv(env: {
 }
 
 /**
+ * Railway's private-network DNS may not be resolvable in the first instant a
+ * container starts. Retries the DB reachability check with backoff (up to
+ * ~30s total) before letting startup proceed, rather than failing on
+ * whichever query happens to run first. Deployment robustness only — no
+ * change to what "ready" means beyond "a query round-trips".
+ */
+async function waitForDatabaseReady(db: Database, logger: Logger): Promise<void> {
+  const backoff = new ExponentialBackoff({ initialMs: 1_000, maxMs: 5_000, factor: 2 });
+  const deadline = Date.now() + 30_000;
+  for (;;) {
+    if ((await checkDatabase(db)) === "ok") return;
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      throw new Error("database not reachable after 30s of retries at startup");
+    }
+    const delay = Math.min(backoff.next(), remaining);
+    logger.warn({ delayMs: delay }, "database not ready yet, retrying...");
+    await new Promise((r) => setTimeout(r, delay));
+  }
+}
+
+/**
  * Manually-curated official Robinhood stock-token addresses (config/stockTokens.json),
  * used only by scoring.ts's Narrative dimension — never inferred or guessed.
  * Empty by default; the file is filled in by hand as tokens are confirmed.
@@ -114,6 +137,12 @@ async function main(): Promise<void> {
   const logger = createLogger(env.LOG_LEVEL);
 
   const db = createDb(env.DATABASE_URL);
+  try {
+    await waitForDatabaseReady(db, logger);
+  } catch (err) {
+    logger.error(err, "database did not become ready at startup");
+    process.exit(1);
+  }
   const scannerStateRepo = createScannerStateRepo(db);
   const tokensRepo = createTokensRepo(db);
   const tradesRepo = createTradesRepo(db);
@@ -310,11 +339,47 @@ async function main(): Promise<void> {
   });
 
   try {
-    await app.listen({ port: env.PORT, host: "0.0.0.0" });
+    // Railway's private networking is IPv6-only. "::" is the IPv6 wildcard
+    // address and binds dual-stack by default (also accepts IPv4), unlike
+    // "0.0.0.0" which is IPv4-only.
+    await app.listen({ port: env.PORT, host: "::" });
   } catch (err) {
     logger.error(err);
     process.exit(1);
   }
+
+  // Railway sends SIGTERM on every redeploy. Without a clean shutdown, each
+  // deploy leaves a dangling DB connection and an unclosed WS subscription —
+  // Railway Postgres's max_connections isn't high, and a few deploys in a
+  // row would exhaust it. Stops every background loop's own timer first (via
+  // their existing stop() methods — nothing new added to those modules),
+  // then the HTTP server, then the DB pool last.
+  let shuttingDown = false;
+  async function shutdown(signal: string): Promise<void> {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    logger.info({ signal }, "received shutdown signal, shutting down gracefully");
+    try {
+      watcher.stop();
+      resonanceDetector.stop();
+      candidateTracker.stop();
+      usdEnrichmentJob.stop();
+      outcomeTracker.stop();
+      await app.close();
+      await db.$client.end();
+      logger.info("shutdown complete");
+      process.exit(0);
+    } catch (err) {
+      logger.error({ err }, "error during shutdown");
+      process.exit(1);
+    }
+  }
+  process.on("SIGTERM", () => {
+    shutdown("SIGTERM").catch(() => process.exit(1));
+  });
+  process.on("SIGINT", () => {
+    shutdown("SIGINT").catch(() => process.exit(1));
+  });
 }
 
 main();

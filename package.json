@@ -17,6 +17,7 @@
     "typecheck:test": "tsc -p tsconfig.test.json",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
+    "db:migrate:prod": "node dist/scripts/migrate.js",
     "wallets:import": "tsx --env-file-if-exists=.env src/scripts/importWallets.ts",
     "wallets:mine": "tsx --env-file-if-exists=.env scripts/mineWallets.ts",
     "wallets:verify": "tsx --env-file-if-exists=.env scripts/verifyWallets.ts",
