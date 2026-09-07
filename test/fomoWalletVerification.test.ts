@@ -8,6 +8,7 @@ import {
   buildCollisionsFile,
   buildLast5Tokens,
   buildRunSummary,
+  classifyAddressType,
   classifyRpcErrorMessage,
   computeDirectActivityForEOA,
   computeRecommendedEnabled,
@@ -18,6 +19,7 @@ import {
   groupCandidatesByAddress,
   looksLikePossibleLostProvenance,
   normalizeAddress,
+  parseEip7702Delegate,
   parseFomoVerifyMetadata,
   planApplyForWallet,
   renderOrReplaceFomoVerifyMetadata,
@@ -42,6 +44,32 @@ describe("validateAddressFormat", () => {
     expect(validateAddressFormat("0x123")).toBe(false);
     expect(validateAddressFormat("0xZZZZ567890123456789012345678901234567890")).toBe(false);
     expect(validateAddressFormat("")).toBe(false);
+  });
+});
+
+describe("classifyAddressType / parseEip7702Delegate", () => {
+  it("classifies empty code as EOA", () => {
+    expect(classifyAddressType("0x")).toBe("EOA");
+    expect(classifyAddressType("")).toBe("EOA");
+  });
+
+  it("classifies the real 72/72 FOMO candidate pattern as EIP7702_DELEGATED_EOA and decodes the delegate address", () => {
+    const code = "0xef0100e6cae83bde06e4c305530e199d7217f42808555b";
+    expect(classifyAddressType(code)).toBe("EIP7702_DELEGATED_EOA");
+    expect(parseEip7702Delegate(code)).toBe("0xe6cae83bde06e4c305530e199d7217f42808555b");
+  });
+
+  it("classifies genuine non-empty contract bytecode as CONTRACT_OR_SMART_ACCOUNT, never as delegated", () => {
+    const code = "0x608060405234801561001057600080fd5b50";
+    expect(classifyAddressType(code)).toBe("CONTRACT_OR_SMART_ACCOUNT");
+    expect(parseEip7702Delegate(code)).toBeNull();
+  });
+
+  it("requires an exact 23-byte match — extra or missing bytes are a real contract, not a delegation designator", () => {
+    const tooLong = "0xef0100e6cae83bde06e4c305530e199d7217f42808555bff";
+    const tooShort = "0xef0100e6cae83bde06e4c305530e199d7217f4280855";
+    expect(classifyAddressType(tooLong)).toBe("CONTRACT_OR_SMART_ACCOUNT");
+    expect(classifyAddressType(tooShort)).toBe("CONTRACT_OR_SMART_ACCOUNT");
   });
 });
 
@@ -131,8 +159,18 @@ describe("determineHistoricalRpcSupport", () => {
       },
     });
     expect(result.historicalRpcSupported).toBe("UNKNOWN");
-    expect(result.reason).toBe("no EOA candidate available for historical nonce probe");
+    expect(result.reason).toBe("no EOA or EIP-7702-delegated-EOA candidate available for historical nonce probe");
     expect(probed).toBe(false);
+  });
+
+  it("probes an EIP7702_DELEGATED_EOA candidate too — the real-world bug this fixes: a 72/72-delegated run had zero plain EOAs and always reported UNKNOWN regardless of what the RPC actually supported", async () => {
+    const result = await determineHistoricalRpcSupport({
+      candidates: [{ address: "0xdelegated", addressType: "EIP7702_DELEGATED_EOA" }],
+      block30dAgo: 100n,
+      probeNonce: async () => 7n,
+    });
+    expect(result.historicalRpcSupported).toBe(true);
+    expect(result.historicalRpcProbeAddress).toBe("0xdelegated");
   });
 
   it("sets true on a successful probe, including a probe result of exactly 0", async () => {
@@ -395,6 +433,41 @@ describe("assembleWalletVerification — CONTRACT_OR_SMART_ACCOUNT wording", () 
     for (const r of result.reasons) {
       expect(r).not.toMatch(/no recent trading/i);
     }
+  });
+});
+
+describe("assembleWalletVerification — EIP7702_DELEGATED_EOA", () => {
+  it("still runs real nonce-based direct-activity analysis (unlike a genuine contract), but always carries the nonce caveat", () => {
+    const result = assembleWalletVerification(
+      baseInputs({
+        addressType: "EIP7702_DELEGATED_EOA",
+        directActivity: {
+          directNonceLatest: 5,
+          directNonce30dAgo: 2,
+          directTxCount30d: 3,
+          directEverActive: true,
+          directRecentActive: true,
+        },
+      }),
+    );
+    expect(result.statusFlags).toContain("EIP7702_DELEGATED_EOA");
+    expect(result.statusFlags).toContain("DIRECT_RECENT_ACTIVE");
+    expect(result.directTxCount30d).toBe(3); // real nonce delta, not discarded like CONTRACT_DIRECT_ACTIVITY would
+    expect(result.reasons.join(" ")).toContain("EIP-7702 authorization refreshes");
+    // never the CONTRACT_OR_SMART_ACCOUNT-specific "not applicable" reason — nonce analysis IS applied here
+    expect(result.reasons.join(" ")).not.toContain("Direct sender nonce analysis is not applicable");
+  });
+
+  it("flags HISTORICAL_RPC_UNAVAILABLE the same way a plain EOA would when the probe never resolved true", () => {
+    const result = assembleWalletVerification(
+      baseInputs({
+        addressType: "EIP7702_DELEGATED_EOA",
+        historicalRpcSupported: "UNKNOWN",
+        directActivity: CONTRACT_DIRECT_ACTIVITY,
+      }),
+    );
+    expect(result.statusFlags).toContain("DIRECT_ACTIVITY_UNKNOWN");
+    expect(result.statusFlags).toContain("HISTORICAL_RPC_UNAVAILABLE");
   });
 });
 
@@ -870,6 +943,7 @@ describe("buildRunSummary / buildActivityRankings", () => {
     expect(summary.inputWallets).toBe(2);
     expect(summary.valid).toBe(2);
     expect(summary.eoa).toBe(1);
+    expect(summary.eip7702DelegatedEoa).toBe(0);
     expect(summary.contractOrSmartAccount).toBe(1);
     expect(summary.recommendedEnabled).toBe(1); // A qualifies, B doesn't
     expect(summary.scannerBuyWallets30d).toBe(1);

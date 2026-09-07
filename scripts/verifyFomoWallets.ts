@@ -120,6 +120,7 @@ function printSummary(summary: lib.RunSummary): void {
   console.log(`Collisions: ${summary.collisions}`);
   console.log();
   console.log(`EOA: ${summary.eoa}`);
+  console.log(`EIP-7702 Delegated EOA: ${summary.eip7702DelegatedEoa}`);
   console.log(`Contract / Smart Account: ${summary.contractOrSmartAccount}`);
   console.log();
   console.log(`Historical state: ${historicalStateLabel(summary.historicalState)}`);
@@ -322,8 +323,7 @@ async function main(): Promise<void> {
     try {
       const type = await withBackoffRetry(async () => {
         const code = await httpClient.getCode({ address: addr as `0x${string}` });
-        const isEoa = !code || code === "0x";
-        return isEoa ? ("EOA" as const) : ("CONTRACT_OR_SMART_ACCOUNT" as const);
+        return lib.classifyAddressType(code ?? "0x");
       }, `eth_getCode(${addr})`);
       addressTypeByAddr.set(addr, type);
     } catch (err) {
@@ -375,12 +375,19 @@ async function main(): Promise<void> {
       (historicalResult.reason ? ` (${historicalResult.reason})` : ""),
   );
 
-  // ---- Section 7: per-EOA direct sender nonces ----
-  const eoaCandidates = validCandidates.filter((c) => addressTypeByAddr.get(lib.normalizeAddress(c.address)) === "EOA");
+  // ---- Section 7: per-EOA (and EIP-7702-delegated-EOA) direct sender nonces ----
+  // A 7702-delegated address is still a real EOA for eth_getTransactionCount
+  // purposes — excluding it here would throw away the exact data the
+  // historical-RPC-support probe (Section 8) needs, and it's real signal
+  // even though it must be read with the EIP7702_NONCE_CAVEAT in mind.
+  const eoaCandidates = validCandidates.filter((c) => {
+    const t = addressTypeByAddr.get(lib.normalizeAddress(c.address));
+    return t === "EOA" || t === "EIP7702_DELEGATED_EOA";
+  });
   const nonceLatestByAddr = new Map<string, number>();
   const nonce30dAgoByAddr = new Map<string, number>();
 
-  console.log(`\nFetching direct-sender nonces for ${eoaCandidates.length} EOA candidates...`);
+  console.log(`\nFetching direct-sender nonces for ${eoaCandidates.length} EOA / EIP-7702-delegated-EOA candidates...`);
   await mapWithConcurrency(eoaCandidates, RPC_CONCURRENCY, async (c) => {
     const addr = lib.normalizeAddress(c.address);
     try {

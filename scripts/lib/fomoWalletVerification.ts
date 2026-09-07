@@ -9,7 +9,7 @@
 //   2. Never guess — missing data is `null` / `"UNKNOWN"`, never silently
 //      downgraded to `0` / `false`.
 
-export type AddressType = "EOA" | "CONTRACT_OR_SMART_ACCOUNT";
+export type AddressType = "EOA" | "EIP7702_DELEGATED_EOA" | "CONTRACT_OR_SMART_ACCOUNT";
 export type TriState = true | false | "UNKNOWN";
 export type HistoricalRpcSupported = true | false | "UNKNOWN";
 
@@ -21,6 +21,36 @@ export function validateAddressFormat(address: string): boolean {
 
 export function normalizeAddress(address: string): string {
   return address.toLowerCase();
+}
+
+// ---------------------------------------------------------------------------
+// EIP-7702 delegation designator detection (added after the 2026-09-07 FOMO
+// Top100 investigation — all 72 candidates' eth_getCode came back as exactly
+// this pattern, not genuine contract bytecode; delegate resolved to
+// eth-infinitism's Simple7702Account behind EntryPoint v0.8).
+// ---------------------------------------------------------------------------
+
+/** EIP-7702 sets an EOA's code to EXACTLY `0xef0100` + a 20-byte delegate
+ * address (23 bytes total, never more/less) — anything else non-empty is a
+ * genuinely deployed contract. Getting this distinction wrong previously
+ * collapsed every 7702-delegated address into CONTRACT_OR_SMART_ACCOUNT,
+ * which (a) wrongly implied "not a real EOA / behavior unattributable to
+ * one person" and (b) silently excluded these addresses from the
+ * historical-RPC-support probe (Section 8) since it only ever looked for an
+ * `addressType === "EOA"` candidate — with zero real EOAs in a candidate set
+ * that's 72/72 delegated, the probe always short-circuited to UNKNOWN
+ * regardless of what the RPC actually supports. */
+const EIP7702_DELEGATION_DESIGNATOR_RE = /^0xef0100([a-fA-F0-9]{40})$/;
+
+export function parseEip7702Delegate(code: string): string | null {
+  const match = EIP7702_DELEGATION_DESIGNATOR_RE.exec(code);
+  return match ? normalizeAddress(`0x${match[1]!}`) : null;
+}
+
+export function classifyAddressType(code: string): AddressType {
+  if (!code || code === "0x") return "EOA";
+  if (parseEip7702Delegate(code) !== null) return "EIP7702_DELEGATED_EOA";
+  return "CONTRACT_OR_SMART_ACCOUNT";
 }
 
 // ---------------------------------------------------------------------------
@@ -153,9 +183,14 @@ export interface HistoricalCapabilityResult {
   reason?: string;
 }
 
-/** Runs the capability probe against the first EOA candidate found (in
- * input order), or returns UNKNOWN immediately if there is none — never
- * probes a CONTRACT_OR_SMART_ACCOUNT address. `probeNonce` must already
+/** Runs the capability probe against the first EOA-or-EIP7702-delegated-EOA
+ * candidate found (in input order), or returns UNKNOWN immediately if there
+ * is none — never probes a genuine CONTRACT_OR_SMART_ACCOUNT address. An
+ * EIP7702_DELEGATED_EOA is still a real EOA for `eth_getTransactionCount`
+ * purposes (own nonce, own private key) — excluding it here was the actual
+ * bug behind an entire 72/72-delegated run always reporting UNKNOWN
+ * regardless of the RPC's real historical-state support (see the
+ * classifyAddressType doc comment above). `probeNonce` must already
  * encapsulate backoff/retry and throw HistoricalCapabilityError /
  * HistoricalTransientError as appropriate (anything else is treated as a
  * transient/unclassified failure — still UNKNOWN, never false). */
@@ -164,14 +199,16 @@ export async function determineHistoricalRpcSupport(params: {
   block30dAgo: bigint;
   probeNonce: (address: string, block: bigint) => Promise<bigint>;
 }): Promise<HistoricalCapabilityResult> {
-  const probeCandidate = params.candidates.find((c) => c.addressType === "EOA");
+  const probeCandidate = params.candidates.find(
+    (c) => c.addressType === "EOA" || c.addressType === "EIP7702_DELEGATED_EOA",
+  );
   if (!probeCandidate) {
     return {
       historicalRpcSupported: "UNKNOWN",
       historicalRpcProbeAddress: null,
       historicalRpcProbeResult: null,
       historicalRpcProbeBlock: null,
-      reason: "no EOA candidate available for historical nonce probe",
+      reason: "no EOA or EIP-7702-delegated-EOA candidate available for historical nonce probe",
     };
   }
 
@@ -414,6 +451,8 @@ const NO_SCANNER_HISTORY_CAVEAT =
 const NO_RECENT_BUY_REASON = "No recent BUY was observed in the scanner-covered markets.";
 const EOA_NO_RECENT_ACTIVITY_REASON =
   "No direct transactions were sent by this EOA in the measured 30-day window. This does not rule out activity through account abstraction, smart accounts, relayers, or other delegated execution paths.";
+const EIP7702_NONCE_CAVEAT =
+  "This address's on-chain code is an EIP-7702 delegation designator (still the user's own EOA, not a deployed contract). Its nonce also increments on EIP-7702 authorization refreshes, not only on sent transactions, so a nonce-based tx count here is not directly comparable to a plain EOA's tx count and should not be read as a precise activity measure. Real trading through this account very likely happens via ERC-4337 UserOperations (sender != tx.from) that the scanner's tx.from-based matching cannot see — see the 2026-09-07 investigation.";
 
 export function assembleWalletVerification(inputs: WalletVerificationInputs): WalletVerification {
   if (!inputs.validAddress) {
@@ -471,6 +510,24 @@ export function assembleWalletVerification(inputs: WalletVerificationInputs): Wa
         statusFlags.push("HISTORICAL_RPC_UNAVAILABLE");
       }
     }
+    if (da.errorReason) {
+      statusFlags.push("ERROR");
+      reasons.push(da.errorReason);
+    }
+  } else if (inputs.addressType === "EIP7702_DELEGATED_EOA") {
+    statusFlags.push("EIP7702_DELEGATED_EOA");
+    if (da.directEverActive === true) statusFlags.push("DIRECT_EVER_ACTIVE");
+    if (da.directRecentActive === true) {
+      statusFlags.push("DIRECT_RECENT_ACTIVE");
+    } else if (da.directRecentActive === false) {
+      statusFlags.push("NO_DIRECT_RECENT_ACTIVITY");
+    } else {
+      statusFlags.push("DIRECT_ACTIVITY_UNKNOWN");
+      if (inputs.historicalRpcSupported !== true) {
+        statusFlags.push("HISTORICAL_RPC_UNAVAILABLE");
+      }
+    }
+    reasons.push(EIP7702_NONCE_CAVEAT);
     if (da.errorReason) {
       statusFlags.push("ERROR");
       reasons.push(da.errorReason);
@@ -900,6 +957,7 @@ export interface RunSummary {
   invalid: number;
   collisions: number;
   eoa: number;
+  eip7702DelegatedEoa: number;
   contractOrSmartAccount: number;
   historicalState: HistoricalRpcSupported;
   historicalStateReason: string | null;
@@ -925,6 +983,7 @@ export function buildRunSummary(
   const valid = wallets.filter((w) => w.validAddress);
   const invalid = wallets.filter((w) => !w.validAddress);
   const eoa = valid.filter((w) => w.addressType === "EOA");
+  const eip7702DelegatedEoa = valid.filter((w) => w.addressType === "EIP7702_DELEGATED_EOA");
   const contracts = valid.filter((w) => w.addressType === "CONTRACT_OR_SMART_ACCOUNT");
 
   return {
@@ -933,6 +992,7 @@ export function buildRunSummary(
     invalid: invalid.length,
     collisions: collisions.length,
     eoa: eoa.length,
+    eip7702DelegatedEoa: eip7702DelegatedEoa.length,
     contractOrSmartAccount: contracts.length,
     historicalState,
     historicalStateReason,
