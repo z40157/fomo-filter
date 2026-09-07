@@ -104,6 +104,39 @@ describe("ChainWatcher restart recovery / backfill", () => {
     expect(watcher.getStatus().lastBlock).toBe(105n);
   });
 
+  it("skips per-block backfill and jumps to head when the missed range exceeds maxBackfillBlocks", async () => {
+    const repo = fakeRepo({ lastProcessedBlock: 100n });
+    const getBlock = vi.fn();
+    const onBlockRange = vi.fn();
+    const httpClient: MinimalHttpClient = {
+      getBlockNumber: vi.fn(async () => 200n),
+      getBlock,
+    };
+    const wsClient: MinimalWsClient = { watchBlockNumber: () => () => {} };
+    const logger = fakeLogger();
+
+    const watcher = new ChainWatcher({
+      chainId: 4663,
+      httpClient,
+      createWsClient: () => wsClient,
+      scannerStateRepo: repo,
+      logger,
+      onBlockRange,
+      maxBackfillBlocks: 50n,
+    });
+
+    await watcher.start();
+
+    expect(getBlock).not.toHaveBeenCalled();
+    expect(onBlockRange).not.toHaveBeenCalled();
+    expect(repo.saveState).toHaveBeenCalledWith(4663, 200n);
+    expect(watcher.getStatus().lastBlock).toBe(200n);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ fromBlock: "101", toBlock: "200", rangeSize: "100" }),
+      "restart recovery: missed range too large to backfill — skipping to current head",
+    );
+  });
+
   it("skips backfill entirely when already caught up", async () => {
     const repo = fakeRepo({ lastProcessedBlock: 100n });
     const getBlock = vi.fn();

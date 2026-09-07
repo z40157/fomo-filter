@@ -3,6 +3,13 @@ import { ExponentialBackoff, type BackoffOptions } from "./backoff.js";
 import { computeBackfillRange } from "./recovery.js";
 import type { ScannerStateRepo } from "../db/scannerState.js";
 
+/** Above this many missed blocks, per-block backfill doesn't scale — jump
+ * straight to the current head instead of grinding through a multi-day gap
+ * one block at a time. ~50k blocks is roughly an hour of downtime on a
+ * fast-block chain; longer outages just lose history rather than blocking
+ * startup for hours. */
+const DEFAULT_MAX_BACKFILL_BLOCKS = 50_000n;
+
 /** Minimal surface of viem's PublicClient this module depends on — keeps
  * the watcher testable without constructing a real viem client. */
 export interface MinimalHttpClient {
@@ -27,6 +34,9 @@ export interface WatcherDeps {
   backoffOptions?: Partial<BackoffOptions>;
   /** How many blocks to fetch concurrently during backfill. Default 10. */
   backfillBatchSize?: number;
+  /** Missed-range size above which backfill is skipped entirely in favor of
+   * jumping to the current head. Default `DEFAULT_MAX_BACKFILL_BLOCKS`. */
+  maxBackfillBlocks?: bigint;
   /**
    * Called with every block range the watcher has just fetched — once per
    * live block (fromBlock === toBlock) and once per restart-recovery
@@ -93,6 +103,23 @@ export class ChainWatcher {
         );
         await this.persist(this.lastProcessedBlock);
       }
+      return;
+    }
+
+    const rangeSize = range.toBlock - range.fromBlock + 1n;
+    const maxBackfillBlocks = this.deps.maxBackfillBlocks ?? DEFAULT_MAX_BACKFILL_BLOCKS;
+    if (rangeSize > maxBackfillBlocks) {
+      this.deps.logger.warn(
+        {
+          fromBlock: range.fromBlock.toString(),
+          toBlock: range.toBlock.toString(),
+          rangeSize: rangeSize.toString(),
+          maxBackfillBlocks: maxBackfillBlocks.toString(),
+        },
+        "restart recovery: missed range too large to backfill — skipping to current head",
+      );
+      this.lastProcessedBlock = currentBlock;
+      await this.persist(currentBlock);
       return;
     }
 
