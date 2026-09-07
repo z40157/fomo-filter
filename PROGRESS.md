@@ -34,8 +34,12 @@ human) can get oriented without re-deriving everything from the code.
   see its own section below. 249/249 historical `trades.wallet`
   misattributions corrected (`--apply` run and re-verified: 0 remaining).
 - ✅ Railway deployment prep (one-off, not a phase) — see its own section
-  below. Code-side prep only; live deploy status on Railway's side is
-  unconfirmed from this repo.
+  below. **Confirmed live 2026-09-07**: `alpha-radar` + `Postgres`
+  services both `Online`, public `/health` returns `status: "ok"`. Its
+  `wallet_watchlist` was found empty on first check (would have
+  permanently blocked outcome-data accumulation) — fixed same day, all
+  72 FOMO Top100 candidates enabled and imported via the live admin API;
+  `/health` now reports `watchedWallets: 72`.
 
 Tests: 354/354 passing (`npm test`). Typecheck clean (`npm run typecheck` and
 `npm run typecheck:test`). `npm run build` clean.
@@ -742,6 +746,14 @@ rather than a tool-only quirk.
   30d stats and `trades.wallet` going forward) reflects real trader
   addresses, not bundler/relayer addresses or an artificially-empty
   EOA bucket.
+- **All 72 candidates were enabled and imported into the live
+  `wallet_watchlist`** (2026-09-07, via the production admin API — see
+  the Railway deployment section below for how production was even
+  reached). All tier `C`, `ownerGroup` = each wallet's own handle (no
+  known shared ownership between them), ownerGroup collision is
+  therefore N/A for this batch. `data/wallets.json` (gitignored, real
+  operational data) updated to match and re-imported into the local dev
+  DB too, so both environments agree.
 
 ### Railway deployment prep (one-off, not a phase) — 2026-09-07
 No code path exercises this automatically — it's infrastructure, verified
@@ -780,12 +792,32 @@ by build/tests + `docker stop` behavior rather than a test suite.
   dimension's official-stock-pair bonus). New `.dockerignore` excludes
   `node_modules`, `.git`, `dist`, `coverage`, `.env*`, `test`, `data`,
   `outputs`, logs.
-- **Not yet confirmed from this side**: whether the Railway service
-  itself has been created/connected on the account and successfully
-  deployed this image — that step happens in Railway's own
-  dashboard/CLI, outside this repo. Build (`npm run build`) and the full
-  test suite pass locally as of this writing; that's necessary but not
-  sufficient evidence of a live deploy.
+- **Confirmed live (2026-09-07, same day)**: connected directly to the
+  user's Railway account (`railway login --browserless`, then `railway
+  link`) and verified from outside the repo. Project "Robinhood Alpha
+  Radar V1", two services both `Online` — `alpha-radar`
+  (https://alpha-radar-production-4d74.up.railway.app) and its `Postgres`
+  database. `GET /health` on the public URL returned
+  `status: "ok", wsConnected: true, database: "ok", dexscreenerStatus: "ok"`.
+  All required env vars are set on the `alpha-radar` service
+  (`DATABASE_URL`, `RH_RPC_HTTP`/`RH_RPC_WS`, `DOPPLER_AIRLOCK_ADDRESS`,
+  `PONS_V1_FACTORY_ADDRESS`, `ADMIN_API_KEY`, `TELEGRAM_BOT_TOKEN`/
+  `TELEGRAM_CHAT_ID`).
+- **Found and fixed a real gap while verifying**: `/health` initially
+  reported `watchedWallets: 0` — production's `wallet_watchlist` was
+  empty, meaning Phase 6 resonance detection (event-driven on watchlist
+  BUYs) could never fire, which would have permanently blocked Phase 9's
+  outcome-data accumulation. Fixed by enabling all 72 FOMO Top100
+  candidates and importing them via the live admin API (see the EIP-7702
+  section above) — `/health` now reports `watchedWallets: 72`.
+  Production's Postgres is reachable only over Railway's private network
+  (`postgres.railway.internal`), so the import went through the public
+  HTTP admin API (`POST /api/wallets` x72, `x-admin-key` header) rather
+  than `npm run wallets:import` against `DATABASE_URL` directly — that
+  script only works from inside Railway's network or via `railway ssh`
+  (and the deploy image has no `tsx`/`data/` to run it there anyway,
+  since `--omit=dev` and `.dockerignore` both exclude them). Useful
+  pattern for any future one-off production data change.
 
 ---
 
@@ -1170,13 +1202,16 @@ them, alerts on the strong ones, and tracks how each one played out. Since
 Phase 9, two one-off hardening efforts landed (see their sections above):
 EIP-7702/EntryPoint wallet-attribution fixes (2026-09-07) and Railway
 deployment prep (2026-09-07) — build and all 354 tests pass, working tree
-is clean and pushed to `main`. **Whether the Railway service itself is
-actually live is unconfirmed from this side** — that's a step in Railway's
-own dashboard/CLI, outside this repo; confirm with a real deployed URL or
-its `/health` output before treating it as done.
+is clean and pushed to `main`. **Deployment is confirmed live** (verified
+2026-09-07 by connecting directly to the Railway account): `alpha-radar` +
+`Postgres` both `Online`, public `/health` healthy, and its previously-empty
+`wallet_watchlist` is now seeded with all 72 FOMO Top100 candidates
+(`watchedWallets: 72`) — the one gap that would have silently prevented any
+signal from ever firing is closed.
 
-Once deployment is confirmed live, the immediate next step isn't code —
-it's **letting outcome data accumulate**. `outcomes:analyze` needs on the
+The immediate next step isn't code — it's **letting outcome data
+accumulate** on the live deployment now that it can actually produce
+signals. `outcomes:analyze` needs on the
 order of tens of data-complete outcomes per importance bucket before its
 numbers mean anything (it says so itself, loudly, below that threshold).
 Once there's a real sample, the scoring thresholds in `signals/scoring.ts`
