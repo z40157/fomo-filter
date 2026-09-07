@@ -100,6 +100,12 @@ function fakeTradesRepo(): TradesRepo & { rows: NewTrade[] } {
     async getSellTotalsByWallets() {
       return new Map();
     },
+    async listWalletActivityAggregates() {
+      return new Map();
+    },
+    async listWalletTokenActivity30d() {
+      return [];
+    },
   };
 }
 

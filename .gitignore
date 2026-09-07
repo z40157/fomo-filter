@@ -7,3 +7,6 @@ coverage/
 data/wallets.json
 data/mined_wallets.json
 data/mobula_cache.json
+data/fomo_top100_watchlist_candidates.json
+data/fomo_top100_watchlist_candidates_FINAL.json
+outputs/

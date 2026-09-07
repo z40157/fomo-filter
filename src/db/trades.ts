@@ -1,4 +1,4 @@
-import { and, asc, count, desc, eq, gt, inArray, isNotNull, isNull, lte, max, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, gte, inArray, isNotNull, isNull, lte, max, sql } from "drizzle-orm";
 import type { Database } from "./client.js";
 import { tokens, trades } from "./schema.js";
 
@@ -59,6 +59,51 @@ export interface TradesRepo {
     wallets: string[],
     before: Date,
   ): Promise<Map<string, { sellAmount: bigint; sellCount: number }>>;
+  /**
+   * One bulk query, per (lowercased) wallet in `wallets`: all-time trade
+   * totals AND a `cutoff30d`-filtered slice, in the same row — via SQL
+   * `FILTER`, never two separate WHERE-scoped queries — so a wallet with
+   * old-but-no-recent activity is distinguishable from a wallet the
+   * scanner has genuinely never seen. Wallets with zero all-time trades
+   * are simply absent from the returned map (never guess $0/false for
+   * them; absence itself is the "never observed" signal for callers).
+   * Built for scripts/verifyFomoWallets.ts — see fomo_top100 verification.
+   */
+  listWalletActivityAggregates(wallets: string[], cutoff30d: Date): Promise<Map<string, WalletActivityAggregate>>;
+  /**
+   * One bulk query, per (lowercased wallet, tokenId) pair active in the last
+   * 30 days: BUY/SELL counts and last-trade time, joined with the token's
+   * address/symbol for display. Grouped in SQL, not fetched per-wallet —
+   * callers derive any "top N tokens per wallet" view by sorting these rows
+   * in application code, never with an extra per-wallet query.
+   */
+  listWalletTokenActivity30d(wallets: string[], cutoff30d: Date): Promise<WalletTokenActivity[]>;
+}
+
+export interface WalletActivityAggregate {
+  wallet: string;
+  totalHistoricalTrades: number;
+  firstTrackedTradeAt: Date | null;
+  lastTrackedTradeAt: Date | null;
+  trackedTrades30d: number;
+  trackedBuys30d: number;
+  trackedSells30d: number;
+  distinctTokens30d: number;
+  pricedTradeCount30d: number;
+  /** Sum of non-null usd_value only — never treats a missing usd_value as $0. Null if no priced BUYs in the window. */
+  trackedBuyUsd30d: number | null;
+  /** Sum of non-null usd_value only — never treats a missing usd_value as $0. Null if no priced SELLs in the window. */
+  trackedSellUsd30d: number | null;
+}
+
+export interface WalletTokenActivity {
+  wallet: string;
+  tokenId: number;
+  tokenAddress: string;
+  symbol: string | null;
+  buyCount: number;
+  sellCount: number;
+  lastTradeAt: Date;
 }
 
 export function createTradesRepo(db: Database): TradesRepo {
@@ -209,6 +254,77 @@ export function createTradesRepo(db: Database): TradesRepo {
         result.set(key, existing);
       }
       return result;
+    },
+
+    async listWalletActivityAggregates(wallets, cutoff30d) {
+      if (wallets.length === 0) return new Map();
+      const lowered = wallets.map((w) => w.toLowerCase());
+
+      const rows = await db
+        .select({
+          wallet: trades.wallet,
+          totalHistoricalTrades: sql<string>`count(*)`,
+          firstTrackedTradeAt: sql<string | null>`min(${trades.timestamp})`,
+          lastTrackedTradeAt: sql<string | null>`max(${trades.timestamp})`,
+          trackedTrades30d: sql<string>`count(*) filter (where ${trades.timestamp} >= ${cutoff30d})`,
+          trackedBuys30d: sql<string>`count(*) filter (where ${trades.timestamp} >= ${cutoff30d} and ${trades.side} = 'BUY')`,
+          trackedSells30d: sql<string>`count(*) filter (where ${trades.timestamp} >= ${cutoff30d} and ${trades.side} = 'SELL')`,
+          distinctTokens30d: sql<string>`count(distinct ${trades.tokenId}) filter (where ${trades.timestamp} >= ${cutoff30d})`,
+          pricedTradeCount30d: sql<string>`count(*) filter (where ${trades.timestamp} >= ${cutoff30d} and ${trades.usdValue} is not null)`,
+          trackedBuyUsd30d: sql<string | null>`sum(${trades.usdValue}) filter (where ${trades.timestamp} >= ${cutoff30d} and ${trades.side} = 'BUY' and ${trades.usdValue} is not null)`,
+          trackedSellUsd30d: sql<string | null>`sum(${trades.usdValue}) filter (where ${trades.timestamp} >= ${cutoff30d} and ${trades.side} = 'SELL' and ${trades.usdValue} is not null)`,
+        })
+        .from(trades)
+        .where(inArray(sql`lower(${trades.wallet})`, lowered))
+        .groupBy(trades.wallet);
+
+      const result = new Map<string, WalletActivityAggregate>();
+      for (const r of rows) {
+        result.set(r.wallet.toLowerCase(), {
+          wallet: r.wallet.toLowerCase(),
+          totalHistoricalTrades: Number(r.totalHistoricalTrades),
+          firstTrackedTradeAt: r.firstTrackedTradeAt ? new Date(r.firstTrackedTradeAt) : null,
+          lastTrackedTradeAt: r.lastTrackedTradeAt ? new Date(r.lastTrackedTradeAt) : null,
+          trackedTrades30d: Number(r.trackedTrades30d),
+          trackedBuys30d: Number(r.trackedBuys30d),
+          trackedSells30d: Number(r.trackedSells30d),
+          distinctTokens30d: Number(r.distinctTokens30d),
+          pricedTradeCount30d: Number(r.pricedTradeCount30d),
+          trackedBuyUsd30d: r.trackedBuyUsd30d === null ? null : Number(r.trackedBuyUsd30d),
+          trackedSellUsd30d: r.trackedSellUsd30d === null ? null : Number(r.trackedSellUsd30d),
+        });
+      }
+      return result;
+    },
+
+    async listWalletTokenActivity30d(wallets, cutoff30d) {
+      if (wallets.length === 0) return [];
+      const lowered = wallets.map((w) => w.toLowerCase());
+
+      const rows = await db
+        .select({
+          wallet: trades.wallet,
+          tokenId: trades.tokenId,
+          tokenAddress: tokens.address,
+          symbol: tokens.symbol,
+          buyCount: sql<string>`count(*) filter (where ${trades.side} = 'BUY')`,
+          sellCount: sql<string>`count(*) filter (where ${trades.side} = 'SELL')`,
+          lastTradeAt: sql<string>`max(${trades.timestamp})`,
+        })
+        .from(trades)
+        .innerJoin(tokens, eq(tokens.id, trades.tokenId))
+        .where(and(inArray(sql`lower(${trades.wallet})`, lowered), gte(trades.timestamp, cutoff30d)))
+        .groupBy(trades.wallet, trades.tokenId, tokens.address, tokens.symbol);
+
+      return rows.map((r) => ({
+        wallet: r.wallet.toLowerCase(),
+        tokenId: r.tokenId,
+        tokenAddress: r.tokenAddress,
+        symbol: r.symbol,
+        buyCount: Number(r.buyCount),
+        sellCount: Number(r.sellCount),
+        lastTradeAt: new Date(r.lastTradeAt),
+      }));
     },
   };
 }
