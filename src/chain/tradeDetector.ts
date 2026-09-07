@@ -1,4 +1,4 @@
-import { encodeAbiParameters, keccak256, parseAbiItem, ResponseBodyTooLargeError } from "viem";
+import { decodeEventLog, encodeAbiParameters, keccak256, parseAbiItem, ResponseBodyTooLargeError } from "viem";
 import type { Logger } from "../logger.js";
 import type { NewTrade, TradeSide, TradesRepo } from "../db/trades.js";
 import type { TokensRepo, TrackedToken } from "../db/tokens.js";
@@ -43,6 +43,25 @@ export const DOPPLER_MODIFY_LIQUIDITY_EVENT = parseAbiItem(
 // WETH-denominated amounts.
 export const PONS_V3_SWAP_EVENT = parseAbiItem(
   "event Swap(address indexed sender, address indexed recipient, int256 amount0, int256 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick)",
+);
+
+// A trade log's tx.from is normally the real trader — except when the tx
+// routes through an ERC-4337 EntryPoint, in which case tx.from is just the
+// bundler/relayer that paid gas. Confirmed live, 2026-09-07: all 72 "FOMO
+// Top100" candidate wallets are EIP-7702-delegated to eth-infinitism's
+// Simple7702Account, which hardcodes this EntryPoint address in its
+// bytecode; real cross-verified transactions (e.g. DumbCrayonEater,
+// dreamloaderxo) show tx.from as a shared bundler while the account's own
+// authorization signature and the EntryPoint's own UserOperationEvent both
+// resolve to the real user. See PROGRESS.md decision on EIP-7702 handling.
+const ENTRY_POINT_ADDRESSES = new Set<string>([
+  "0x4337084d9e255ff0702461cf8895ce9e3b5ff108", // ERC-4337 EntryPoint v0.8
+]);
+
+// Stable across ERC-4337 EntryPoint versions (v0.6 through v0.8) — verified
+// against a real UserOperationEvent log on this chain (success:true).
+const USER_OPERATION_EVENT = parseAbiItem(
+  "event UserOperationEvent(bytes32 indexed userOpHash, address indexed sender, address indexed paymaster, uint256 nonce, bool success, uint256 actualGasCost, uint256 actualGasUsed)",
 );
 
 export interface PoolKeyArgs {
@@ -104,8 +123,34 @@ export interface TradeDetectorHttpClient {
     fromBlock: bigint;
     toBlock: bigint;
   }) => Promise<TradeLog<PonsSwapArgs>[]>;
-  getTransactionSender: (hash: `0x${string}`) => Promise<`0x${string}`>;
+  /**
+   * Resolves the real trading wallet for one specific trade log. For a
+   * plain EOA-originated tx this is just tx.from (the common case — no
+   * extra RPC call beyond the tx fetch itself needed to check `to`). For a
+   * tx routed through a known ERC-4337 EntryPoint, tx.from is the
+   * bundler/relayer, not the trader: `handleOps` processes each
+   * UserOperation sequentially, so every log an op's execution produces
+   * (including this trade's own Swap log) precedes exactly one
+   * UserOperationEvent for that same op — the first such event at a higher
+   * logIndex than this log, within the same tx, names the real sender. This
+   * also correctly separates multiple real users batched into one
+   * handleOps call (confirmed against a real tx bundling 2 distinct
+   * senders). Falls back to tx.from — flagged via `resolvedViaUserOp:
+   * false`, never silently — if no matching event is found.
+   */
+  resolveTradeWallet: (params: {
+    transactionHash: `0x${string}`;
+    logIndex: number;
+  }) => Promise<ResolvedTradeWallet>;
   getBlockTimestamp: (blockNumber: bigint) => Promise<bigint>;
+}
+
+export interface ResolvedTradeWallet {
+  wallet: `0x${string}`;
+  /** true when tx.to matched a known ERC-4337 EntryPoint — tx.from is the bundler/relayer in this case, not the trader. */
+  viaEntryPoint: boolean;
+  /** Only meaningful when viaEntryPoint is true. false means no matching UserOperationEvent was found and `wallet` fell back to tx.from (the bundler) — should not happen for a well-formed handleOps call, but never silently assumed. */
+  resolvedViaUserOp: boolean;
 }
 
 const POOL_KEY_ABI_PARAM = {
@@ -207,9 +252,40 @@ export function createTradeDetectorHttpClient(client: HttpClient): TradeDetector
       }));
     },
 
-    async getTransactionSender(hash) {
-      const tx = await client.getTransaction({ hash });
-      return tx.from;
+    async resolveTradeWallet({ transactionHash, logIndex }) {
+      const tx = await client.getTransaction({ hash: transactionHash });
+      const to = tx.to?.toLowerCase() ?? null;
+      if (!to || !ENTRY_POINT_ADDRESSES.has(to)) {
+        return { wallet: tx.from, viaEntryPoint: false, resolvedViaUserOp: false };
+      }
+
+      const receipt = await client.getTransactionReceipt({ hash: transactionHash });
+      const candidateEvents = receipt.logs
+        .filter((log) => log.address.toLowerCase() === to && log.logIndex > logIndex)
+        .sort((a, b) => a.logIndex - b.logIndex);
+
+      for (const log of candidateEvents) {
+        try {
+          const decoded = decodeEventLog({
+            abi: [USER_OPERATION_EVENT],
+            data: log.data,
+            topics: log.topics,
+          });
+          // decodeEventLog returns the checksummed (EIP-55) casing from the
+          // ABI decode, unlike tx.from (lowercase on this RPC, per Phase 8) —
+          // lowercase here so ResolvedTradeWallet.wallet has one guaranteed
+          // canonical form regardless of which branch produced it, same
+          // convention every other wallet field in this codebase follows.
+          return { wallet: decoded.args.sender.toLowerCase() as `0x${string}`, viaEntryPoint: true, resolvedViaUserOp: true };
+        } catch {
+          // Not a UserOperationEvent (or a differently-shaped one) — keep
+          // looking at the next log rather than assuming the first EntryPoint
+          // log after ours is necessarily the right one.
+          continue;
+        }
+      }
+
+      return { wallet: tx.from, viaEntryPoint: true, resolvedViaUserOp: false };
     },
 
     async getBlockTimestamp(blockNumber) {
@@ -305,16 +381,31 @@ export function createTradeDetector(deps: TradeDetectorDeps): TradeDetector {
     logIndex: number;
   }): Promise<void> {
     try {
-      const [rawWallet, timestamp] = await Promise.all([
-        deps.httpClient.getTransactionSender(params.transactionHash),
+      const [walletResolution, timestamp] = await Promise.all([
+        deps.httpClient.resolveTradeWallet({ transactionHash: params.transactionHash, logIndex: params.logIndex }),
         deps.httpClient.getBlockTimestamp(params.blockNumber),
       ]);
-      // `tx.from` already comes back lowercase from this chain's RPC, but
-      // lowercase it explicitly anyway so every downstream wallet filter
-      // (watchlist matching, per-wallet sell totals, deployer-sold check)
-      // has a guaranteed single canonical form regardless of RPC/viem
-      // quirks — same convention wallet_watchlist already uses.
-      const wallet = rawWallet.toLowerCase();
+      // Address casing already comes back lowercase from this chain's RPC
+      // (both tx.from and decoded event args), but lowercase explicitly
+      // anyway so every downstream wallet filter (watchlist matching,
+      // per-wallet sell totals, deployer-sold check) has a guaranteed single
+      // canonical form regardless of RPC/viem quirks — same convention
+      // wallet_watchlist already uses.
+      const wallet = walletResolution.wallet.toLowerCase();
+
+      if (walletResolution.viaEntryPoint) {
+        if (walletResolution.resolvedViaUserOp) {
+          deps.logger.info(
+            { tx: params.transactionHash, wallet },
+            "trade routed through ERC-4337 EntryPoint — resolved to real UserOperation sender, not the bundler",
+          );
+        } else {
+          deps.logger.warn(
+            { tx: params.transactionHash, logIndex: params.logIndex, wallet },
+            "trade routed through ERC-4337 EntryPoint but no matching UserOperationEvent found — falling back to tx.from (likely the bundler, not the real trader)",
+          );
+        }
+      }
 
       const trade: NewTrade = {
         chainId: deps.chainId,

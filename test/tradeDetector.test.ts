@@ -1,13 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
+import { encodeAbiParameters, encodeEventTopics, parseAbiItem } from "viem";
 import {
   computeDopplerPoolId,
   createTradeDetector,
+  createTradeDetectorHttpClient,
   type DopplerModifyLiquidityArgs,
   type DopplerSwapArgs,
   type PonsSwapArgs,
   type TradeDetectorHttpClient,
   type TradeLog,
 } from "../src/chain/tradeDetector.js";
+import type { HttpClient } from "../src/chain/client.js";
 import type { NewToken, TokensRepo, TrackedToken } from "../src/db/tokens.js";
 import type { NewTrade, TradesRepo } from "../src/db/trades.js";
 import type { WalletEntry } from "../src/db/walletWatchlist.js";
@@ -252,7 +255,7 @@ function makeHttpClient(overrides: Partial<TradeDetectorHttpClient> = {}): Trade
     getDopplerModifyLiquidityLogs: vi.fn(async () => []),
     getDopplerSwapLogs: vi.fn(async () => []),
     getPonsSwapLogs: vi.fn(async () => []),
-    getTransactionSender: vi.fn(async () => WALLET),
+    resolveTradeWallet: vi.fn(async () => ({ wallet: WALLET, viaEntryPoint: false, resolvedViaUserOp: false })),
     getBlockTimestamp: vi.fn(async () => 1_700_000_000n),
     ...overrides,
   };
@@ -598,5 +601,209 @@ describe("TradeDetector — resonance detection integration", () => {
     await detector.processBlockRange(105n, 105n);
 
     expect(resonanceDetector.events).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// EIP-7702 / ERC-4337 EntryPoint wallet resolution
+// ---------------------------------------------------------------------------
+
+const ENTRY_POINT_V08 = "0x4337084d9e255ff0702461cf8895ce9e3b5ff108" as const;
+const REAL_TRADER = "0x8f62a08537cede87d511aca6436274ab4ca080a3" as const; // DumbCrayonEater, real FOMO Top100 candidate address
+const BUNDLER = "0x43370371e0bb085d04d02a815230aaf67b35ef25" as const; // real observed bundler tx.from
+
+describe("TradeDetector — records the real UserOperation sender, not the bundler, for EntryPoint-routed trades", () => {
+  it("uses resolveTradeWallet's wallet when viaEntryPoint=true, and logs info (not warn)", async () => {
+    const tokensRepo = fakeTokensRepo([dopplerToken({ poolId: DOPPLER_POOL_ID })]);
+    const tradesRepo = fakeTradesRepo();
+    const logger = fakeLogger();
+    const httpClient = makeHttpClient({
+      getDopplerSwapLogs: vi.fn(async () => [dopplerSwapLog()]),
+      resolveTradeWallet: vi.fn(async () => ({ wallet: REAL_TRADER, viaEntryPoint: true, resolvedViaUserOp: true })),
+    });
+
+    const detector = createTradeDetector({
+      chainId: CHAIN_ID,
+      httpClient,
+      tokensRepo,
+      tradesRepo,
+      watchlistCache: fakeWatchlistCache(),
+      resonanceDetector: fakeResonanceDetector(),
+      logger,
+    });
+
+    await detector.processBlockRange(105n, 105n);
+
+    expect(tradesRepo.rows[0]?.wallet).toBe(REAL_TRADER);
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ wallet: REAL_TRADER }),
+      expect.stringContaining("resolved to real UserOperation sender"),
+    );
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it("falls back to tx.from (the bundler) and logs a warn when no matching UserOperationEvent was found", async () => {
+    const tokensRepo = fakeTokensRepo([dopplerToken({ poolId: DOPPLER_POOL_ID })]);
+    const tradesRepo = fakeTradesRepo();
+    const logger = fakeLogger();
+    const httpClient = makeHttpClient({
+      getDopplerSwapLogs: vi.fn(async () => [dopplerSwapLog()]),
+      resolveTradeWallet: vi.fn(async () => ({ wallet: BUNDLER, viaEntryPoint: true, resolvedViaUserOp: false })),
+    });
+
+    const detector = createTradeDetector({
+      chainId: CHAIN_ID,
+      httpClient,
+      tokensRepo,
+      tradesRepo,
+      watchlistCache: fakeWatchlistCache(),
+      resonanceDetector: fakeResonanceDetector(),
+      logger,
+    });
+
+    await detector.processBlockRange(105n, 105n);
+
+    expect(tradesRepo.rows[0]?.wallet).toBe(BUNDLER);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ wallet: BUNDLER }),
+      expect.stringContaining("no matching UserOperationEvent found"),
+    );
+  });
+
+  it("passes the trade log's own logIndex to resolveTradeWallet, not some other value", async () => {
+    const tokensRepo = fakeTokensRepo([dopplerToken({ poolId: DOPPLER_POOL_ID })]);
+    const tradesRepo = fakeTradesRepo();
+    const resolveTradeWallet = vi.fn(async () => ({ wallet: WALLET, viaEntryPoint: false, resolvedViaUserOp: false }));
+    const httpClient = makeHttpClient({
+      getDopplerSwapLogs: vi.fn(async () => [dopplerSwapLog({}, { logIndex: 42 })]),
+      resolveTradeWallet,
+    });
+
+    const detector = createTradeDetector({
+      chainId: CHAIN_ID,
+      httpClient,
+      tokensRepo,
+      tradesRepo,
+      watchlistCache: fakeWatchlistCache(),
+      resonanceDetector: fakeResonanceDetector(),
+      logger: fakeLogger(),
+    });
+
+    await detector.processBlockRange(105n, 105n);
+
+    expect(resolveTradeWallet).toHaveBeenCalledWith(
+      expect.objectContaining({ logIndex: 42, transactionHash: "0xbbbb000000000000000000000000000000000000000000000000000000bbbb" }),
+    );
+  });
+});
+
+const USER_OPERATION_EVENT_ABI = parseAbiItem(
+  "event UserOperationEvent(bytes32 indexed userOpHash, address indexed sender, address indexed paymaster, uint256 nonce, bool success, uint256 actualGasCost, uint256 actualGasUsed)",
+);
+
+function userOperationEventLog(params: {
+  address?: `0x${string}`;
+  sender: `0x${string}`;
+  logIndex: number;
+  userOpHash?: `0x${string}`;
+}) {
+  const userOpHash = params.userOpHash ?? (`0x${"1".repeat(64)}` as `0x${string}`);
+  const topics = encodeEventTopics({
+    abi: [USER_OPERATION_EVENT_ABI],
+    eventName: "UserOperationEvent",
+    args: { userOpHash, sender: params.sender, paymaster: "0x0000000000000000000000000000000000000000" },
+  });
+  const data = encodeAbiParameters(
+    [
+      { name: "nonce", type: "uint256" },
+      { name: "success", type: "bool" },
+      { name: "actualGasCost", type: "uint256" },
+      { name: "actualGasUsed", type: "uint256" },
+    ],
+    [1n, true, 100n, 90n],
+  );
+  return { address: params.address ?? ENTRY_POINT_V08, topics, data, logIndex: params.logIndex } as const;
+}
+
+const TX_HASH = "0xdddd000000000000000000000000000000000000000000000000000000dddd" as const;
+
+/** Minimal fake satisfying only the two viem PublicClient methods
+ * createTradeDetectorHttpClient's resolveTradeWallet actually calls. */
+function fakeViemClient(params: { from: `0x${string}`; to: `0x${string}` | null; receiptLogs?: unknown[] }): HttpClient {
+  return {
+    getTransaction: vi.fn(async () => ({ from: params.from, to: params.to })),
+    getTransactionReceipt: vi.fn(async () => ({ logs: params.receiptLogs ?? [] })),
+  } as unknown as HttpClient;
+}
+
+describe("createTradeDetectorHttpClient — resolveTradeWallet (real EIP-7702/ERC-4337 decoding logic)", () => {
+  it("returns tx.from directly, with viaEntryPoint=false, when tx.to is not a known EntryPoint (the common, non-AA case)", async () => {
+    const client = fakeViemClient({ from: BUNDLER, to: DOPPLER_INITIALIZER });
+    const httpClient = createTradeDetectorHttpClient(client);
+
+    const result = await httpClient.resolveTradeWallet({ transactionHash: TX_HASH, logIndex: 7 });
+
+    expect(result).toEqual({ wallet: BUNDLER, viaEntryPoint: false, resolvedViaUserOp: false });
+    expect(client.getTransactionReceipt).not.toHaveBeenCalled();
+  });
+
+  it("resolves to the real UserOperation sender from the first UserOperationEvent after the trade log's logIndex", async () => {
+    const client = fakeViemClient({
+      from: BUNDLER,
+      to: ENTRY_POINT_V08,
+      receiptLogs: [userOperationEventLog({ sender: REAL_TRADER, logIndex: 8 })],
+    });
+    const httpClient = createTradeDetectorHttpClient(client);
+
+    const result = await httpClient.resolveTradeWallet({ transactionHash: TX_HASH, logIndex: 7 });
+
+    expect(result).toEqual({ wallet: REAL_TRADER, viaEntryPoint: true, resolvedViaUserOp: true });
+  });
+
+  it("separates two different real users batched into one handleOps call by picking the nearest following UserOperationEvent, never the tx-wide one", async () => {
+    const SECOND_TRADER = "0xf75f2f708e489299c992349a73baec209b400aa0" as const; // real FOMO Top100 candidate (dreamloaderxo)
+    const client = fakeViemClient({
+      from: BUNDLER,
+      to: ENTRY_POINT_V08,
+      receiptLogs: [
+        userOperationEventLog({ sender: REAL_TRADER, logIndex: 5 }), // op #1's event — precedes op #2's swap
+        userOperationEventLog({ sender: SECOND_TRADER, logIndex: 12 }), // op #2's event
+      ],
+    });
+    const httpClient = createTradeDetectorHttpClient(client);
+
+    // A swap log between the two UserOperationEvents belongs to op #2, not op #1.
+    const result = await httpClient.resolveTradeWallet({ transactionHash: TX_HASH, logIndex: 9 });
+
+    expect(result.wallet).toBe(SECOND_TRADER);
+  });
+
+  it("falls back to tx.from and reports resolvedViaUserOp=false when tx.to is an EntryPoint but no matching event follows the log", async () => {
+    const client = fakeViemClient({
+      from: BUNDLER,
+      to: ENTRY_POINT_V08,
+      receiptLogs: [userOperationEventLog({ sender: REAL_TRADER, logIndex: 3 })], // only precedes our log, doesn't follow it
+    });
+    const httpClient = createTradeDetectorHttpClient(client);
+
+    const result = await httpClient.resolveTradeWallet({ transactionHash: TX_HASH, logIndex: 7 });
+
+    expect(result).toEqual({ wallet: BUNDLER, viaEntryPoint: true, resolvedViaUserOp: false });
+  });
+
+  it("ignores a non-UserOperationEvent log at the EntryPoint address rather than crashing or misattributing", async () => {
+    const client = fakeViemClient({
+      from: BUNDLER,
+      to: ENTRY_POINT_V08,
+      receiptLogs: [
+        { address: ENTRY_POINT_V08, topics: [`0x${"9".repeat(64)}` as `0x${string}`], data: "0x", logIndex: 8 },
+        userOperationEventLog({ sender: REAL_TRADER, logIndex: 9 }),
+      ],
+    });
+    const httpClient = createTradeDetectorHttpClient(client);
+
+    const result = await httpClient.resolveTradeWallet({ transactionHash: TX_HASH, logIndex: 7 });
+
+    expect(result).toEqual({ wallet: REAL_TRADER, viaEntryPoint: true, resolvedViaUserOp: true });
   });
 });
