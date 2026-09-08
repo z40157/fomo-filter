@@ -36,6 +36,10 @@ const envSchema = z.object({
   // the label set stays fixed.
   OUTCOME_SWEEP_INTERVAL_MS: z.coerce.number().int().positive().optional(),
   OUTCOME_OFFSETS_MS: z.string().optional(),
+  // Continuous wallet discovery — optional, default (24h) lives in
+  // index.ts's WALLET_DISCOVERY_INTERVAL_MS. Only for shortening the
+  // schedule during a live test; new wallets always land disabled either way.
+  DISCOVERY_INTERVAL_MS: z.coerce.number().int().positive().optional(),
   LOG_LEVEL: z
     .enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"])
     .default("info"),

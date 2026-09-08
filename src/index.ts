@@ -32,10 +32,13 @@ import { DEFAULT_OUTCOME_OFFSETS, type OutcomeOffset } from "./outcomes/outcomeT
 import { createAlertDispatcher } from "./alerts/alertDispatcher.js";
 import { createResendClient } from "./alerts/resendClient.js";
 import { createTelegramClient } from "./alerts/telegramClient.js";
+import { createDiscoveryRepo } from "./db/discovery.js";
+import { createWalletDiscoveryJob } from "./discovery/walletDiscoveryJob.js";
 
 const WATCHLIST_REFRESH_INTERVAL_MS = 60_000;
 const USD_ENRICHMENT_INTERVAL_MS = 30_000;
 const OUTCOME_SWEEP_INTERVAL_MS = 30_000;
+const WALLET_DISCOVERY_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 /**
  * Parse OUTCOME_OFFSETS_MS ("ms,ms,ms,ms,ms") into the tracker's offset
@@ -317,6 +320,24 @@ async function main(): Promise<void> {
   // from the DB on its own timer, fully decoupled from signal generation.
   outcomeTracker.start(env.OUTCOME_SWEEP_INTERVAL_MS ?? OUTCOME_SWEEP_INTERVAL_MS);
 
+  // Continuous wallet discovery (2026-09-08): the manually-curated 72-wallet
+  // FOMO Top100 list turned out to have zero on-chain activity in production
+  // (see PROGRESS.md) — this replaces "mine once, review, import by hand"
+  // with a daily automated pass over real production trade + price data.
+  // New candidates always land `enabled: false` (never auto-activates real
+  // alerting) and a Telegram summary is sent for manual review.
+  const discoveryRepo = createDiscoveryRepo(db);
+  const walletDiscoveryJob = createWalletDiscoveryJob({
+    discoveryRepo,
+    walletsRepo,
+    watchlistCache,
+    httpClient,
+    telegramClient,
+    logger,
+    extraExclusions: [env.DOPPLER_AIRLOCK_ADDRESS, env.PONS_V1_FACTORY_ADDRESS],
+  });
+  walletDiscoveryJob.start(env.DISCOVERY_INTERVAL_MS ?? WALLET_DISCOVERY_INTERVAL_MS);
+
   const app = buildServer({
     logger,
     chainId: CHAIN_ID,
@@ -382,6 +403,7 @@ async function main(): Promise<void> {
       candidateTracker.stop();
       usdEnrichmentJob.stop();
       outcomeTracker.stop();
+      walletDiscoveryJob.stop();
       resonanceDetector.stop();
 
       logger.info("closing database");
