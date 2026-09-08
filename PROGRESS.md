@@ -1196,29 +1196,90 @@ amount exactly).
   many are actually due. Worth revisiting if the tracked-token count grows
   by an order of magnitude.
 
-## Next planned phase
-Phases 0-9 are complete. The system now records signals, scores/grades
-them, alerts on the strong ones, and tracks how each one played out. Since
-Phase 9, two one-off hardening efforts landed (see their sections above):
-EIP-7702/EntryPoint wallet-attribution fixes (2026-09-07) and Railway
-deployment prep (2026-09-07) — build and all 354 tests pass, working tree
-is clean and pushed to `main`. **Deployment is confirmed live** (verified
-2026-09-07 by connecting directly to the Railway account): `alpha-radar` +
-`Postgres` both `Online`, public `/health` healthy, and its previously-empty
-`wallet_watchlist` is now seeded with all 72 FOMO Top100 candidates
-(`watchedWallets: 72`) — the one gap that would have silently prevented any
-signal from ever firing is closed.
+## Phase 10 — Continuous wallet discovery (completed 2026-09-08, commit `9d8a41d`, deployed via `railway up`)
 
-The immediate next step isn't code — it's **letting outcome data
-accumulate** on the live deployment now that it can actually produce
-signals. `outcomes:analyze` needs on the
-order of tens of data-complete outcomes per importance bucket before its
-numbers mean anything (it says so itself, loudly, below that threshold).
-Once there's a real sample, the scoring thresholds in `signals/scoring.ts`
-can be tuned against it — and when they are, bump `SCORING_RULE_VERSION`
-(decision #11).
+**Why**: the static 72-wallet FOMO Top100 watchlist seeded 2026-09-07 produced
+**zero** signals a day later. Root-cause investigation via `railway logs`
+(spanning all of 2026-09-07 into 09-08) confirmed it wasn't a code bug —
+`watchlistCache` was correctly loaded (`/health` showed `watchedWallets: 72`)
+and trades were being recorded normally (thousands/day) — but literally
+**none** of the 72 watched addresses ever appeared as a trader. Phase 6
+resonance detection is purely event-driven off watchlist BUYs, so a dormant
+watchlist means zero signal candidates no matter how long the service runs.
+Those 72 were a one-time historical mining pass (Mobula demo-tier PnL,
+whose `period` param doesn't actually filter by time — see Phase
+"Wallet-mining tool" notes above); plausible they're simply inactive now.
+
+**What shipped**: `src/discovery/walletDiscoveryJob.ts`, a new background
+job (same start/stop shape as `usdEnrichmentJob`/`outcomeTracker`, but also
+fires once immediately at startup so results don't wait a full day) that
+re-runs the same early-buyer-of-a-performing-token analysis
+`scripts/mineWallets.ts` used to do manually — but continuously, against
+live production data:
+- Ranks tokens by **real** price performance (`token_snapshots`, Phase 5)
+  via `rankTokensByRealPerformance` (`src/discovery/miningLogic.ts`) —
+  supersedes the old trade-count-only proxy score in `scripts/lib/mining.ts`
+  (written before Phase 5 existed, when no price data was available at all).
+- Finds early buyers of the top-N performing tokens (`findEarlyBuyersByCount`
+  / `findEarlyBuyersByTime` / `aggregateCandidates`, same logic
+  `mineWallets.ts` used — moved into `src/discovery/miningLogic.ts` so it
+  ships in the compiled `dist/` image; `scripts/lib/mining.ts` now
+  re-exports from there unchanged, so the one-off manual tool still works).
+- Excludes known infra addresses (deployer/initializer/pool + Doppler
+  Airlock/Pons Factory), any address already on the watchlist (any enabled
+  state), and real contracts.
+- **New candidates always land `enabled: false`** — an explicit product
+  decision (the user chose this over auto-enable when asked) — this never
+  auto-activates real Telegram alerting off an unvetted address. A Telegram
+  summary is sent whenever candidates are added, for manual review/promotion
+  via the existing admin API.
+- Default cadence: daily (`WALLET_DISCOVERY_INTERVAL_MS` = 24h in
+  `index.ts`, overridable via `DISCOVERY_INTERVAL_MS`).
+
+**Bug found and fixed while building this**: `scripts/mineWallets.ts`'s old
+contract check (`eth_getCode !== "0x"` ⇒ treat as contract, exclude) would
+have wrongly excluded every EIP-7702-delegated EOA — exactly the account
+type the entire 72-wallet FOMO Top100 turned out to be. The corrected
+classifier (`classifyAddressType`: `EOA` / `EIP7702_DELEGATED_EOA` /
+`CONTRACT_OR_SMART_ACCOUNT`) moved out of
+`scripts/lib/fomoWalletVerification.ts` into `src/chain/addressType.ts` so
+it's shared production code; `walletDiscoveryJob` uses it and correctly
+keeps EIP-7702-delegated EOAs as valid candidates (regression-tested).
+
+**Real verification on live production, same session**: after deploying,
+the very first run logged `tokensConsidered=112 tokensRanked=15
+candidatesFound=1584 candidatesAdded=20` (capped at
+`maxNewCandidatesPerRun`); confirmed via the live admin API that all 20 new
+`AutoDiscovered_*` wallets are really in `wallet_watchlist` with
+`enabled: false` (92 total wallets afterward). 364/364 tests pass (10 new),
+typecheck + build clean.
+
+**Deployment mechanism note**: `git push` to `origin/main` did NOT trigger
+a Railway redeploy on its own (`railway deployment list` showed the prior
+deployment still current several minutes after the push) — had to run
+`railway up --service alpha-radar --detach` to actually ship this. Always
+do that after pushing, and poll `railway deployment list` for `SUCCESS`.
+
+## Next planned phase
+Phases 0-10 are complete. The system now records signals, scores/grades
+them, alerts on the strong ones, tracks how each one played out, AND keeps
+discovering fresh candidate wallets daily instead of relying on a single
+static list.
+
+The immediate next step isn't code — it's **watching the daily discovery
+Telegram summaries and promoting promising candidates** (flip `enabled` via
+the admin API) so the 92-wallet watchlist actually starts producing
+watchlist-BUY hits again, and **letting outcome data accumulate** once it
+does. `outcomes:analyze` needs on the order of tens of data-complete
+outcomes per importance bucket before its numbers mean anything (it says so
+itself, loudly, below that threshold). Once there's a real sample, the
+scoring thresholds in `signals/scoring.ts` can be tuned against it — and
+when they are, bump `SCORING_RULE_VERSION` (decision #11).
 
 Possible later work, none scoped yet: a dashboard over the `alerts` /
-`signal_outcomes` tables; `token_snapshots` retention (decision #9);
-historical Pons launch backfill; denser outcome sampling if the discrete
-5-point limitation (decision #12) proves too coarse.
+`signal_outcomes` tables (now also a natural place to review daily
+discovery candidates instead of only Telegram); `token_snapshots` retention
+(decision #9); historical Pons launch backfill; denser outcome sampling if
+the discrete 5-point limitation (decision #12) proves too coarse; an admin
+API bulk-enable endpoint if reviewing/promoting discovery candidates one at
+a time via `PATCH /api/wallets/:address` becomes tedious.
