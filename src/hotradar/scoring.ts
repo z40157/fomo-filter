@@ -67,6 +67,11 @@ export interface DistributionInputs {
   holderGrowth: number | null; // positive = growing holder count
   top10HolderPct: number | null; // 0-100
   sameWalletBuyRatio: number | null; // 0-1, fraction of buys that are repeats from the same wallet
+  /** A.9: only meaningful once age >= 3m — whether concentration is
+   * diluting over time (90%->68%->42%, positive) or stuck
+   * (88%->87%->86%, negative), not the absolute level alone. null when
+   * not yet applicable (age < 3m) or not computable. */
+  concentrationTrend?: "IMPROVING" | "STAGNANT" | "UNKNOWN" | null;
 }
 
 export function scoreDistribution(inputs: DistributionInputs): DimensionScore {
@@ -88,8 +93,15 @@ export function scoreDistribution(inputs: DistributionInputs): DimensionScore {
   if (inputs.top10HolderPct !== null) {
     hadAnySignal = true;
     // Healthier (lower) concentration contributes more — inverted, capped.
-    score += clamp((100 - inputs.top10HolderPct) / 100, 0, 1) * 0.4;
+    let contribution = clamp((100 - inputs.top10HolderPct) / 100, 0, 1) * 0.4;
+    // A.9: the trajectory matters more than the absolute level once age
+    // >= 3m — improving dilution is rewarded on top of the raw level,
+    // stagnation at the same level is penalized relative to it.
+    if (inputs.concentrationTrend === "IMPROVING") contribution = Math.min(0.4, contribution + 0.1);
+    else if (inputs.concentrationTrend === "STAGNANT") contribution = Math.max(0, contribution - 0.1);
+    score += contribution;
     reasons.push(`top10HolderPct=${inputs.top10HolderPct.toFixed(1)}`);
+    if (inputs.concentrationTrend) reasons.push(`concentrationTrend=${inputs.concentrationTrend}`);
   }
   if (inputs.sameWalletBuyRatio !== null) {
     hadAnySignal = true;

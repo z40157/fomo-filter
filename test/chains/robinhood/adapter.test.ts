@@ -345,6 +345,27 @@ describe("createRobinhoodAdapter — holder feed", () => {
     expect(onTransfer).toHaveBeenCalledTimes(1);
     expect(onTransfer.mock.calls[0][0]).toMatchObject({ tokenAddress: token, amount: 42n, from, to });
   });
+
+  it("backfillHolderTransfers does a one-time chunked getLogs from launchBlock, not a live subscription (A.13 step 2)", async () => {
+    const getLogs = vi.fn(async () => [
+      { address: addr("701"), args: { from: addr("f01"), to: addr("701a"), value: 7n }, blockNumber: 50n, transactionHash: "0xbackfill1", logIndex: 0 },
+    ]);
+    const adapter = createRobinhoodAdapter({
+      httpClient: fakeHttpClient({ getLogs, getBlockNumber: async () => 60n }),
+      createWsClient: () => fakeWsClient([]),
+      dopplerAirlockAddress: AIRLOCK,
+      ponsV1FactoryAddress: FACTORY,
+      logger,
+    });
+
+    const token = addr("701");
+    const onTransfer = vi.fn();
+    await adapter.backfillHolderTransfers!(token, 10n, onTransfer);
+
+    expect(getLogs).toHaveBeenCalledWith(expect.objectContaining({ address: token, fromBlock: 10n, toBlock: 60n }));
+    expect(onTransfer).toHaveBeenCalledTimes(1);
+    expect(onTransfer.mock.calls[0][0]).toMatchObject({ tokenAddress: token, amount: 7n });
+  });
 });
 
 describe("createRobinhoodAdapter — honesty (never fabricate PASS/liquidityUsd)", () => {

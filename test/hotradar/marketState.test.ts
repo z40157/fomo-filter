@@ -26,6 +26,16 @@ describe("TokenMarketState — partial windows (B2.4)", () => {
     expect(snapshot.windows["1m"].buys).toBeNull();
   });
 
+  it("age between 1m and 3m: a trade drops out of the 1m window but still counts in 3m/5m", () => {
+    const t0 = Date.now();
+    const state = new TokenMarketState();
+    state.recordTrade(trade({ timestamp: new Date(t0), wallet: "0xa", usdValue: 10 }), null);
+    const snapshot = state.snapshot(t0 + 90_000); // 90s later — outside 1m, inside 3m/5m
+    expect(snapshot.windows["1m"].buys).toBeNull();
+    expect(snapshot.windows["3m"].buys).toBe(1);
+    expect(snapshot.windows["5m"].buys).toBe(1);
+  });
+
   it("age < 1m: only the 1m window has data, 3m/5m still see it too since they're supersets", () => {
     const t0 = Date.now();
     const state = new TokenMarketState();

@@ -172,6 +172,25 @@ describe("HotCandidateManager — tick evaluation", () => {
   });
 });
 
+describe("HotCandidateManager — radarState / protocolState are independent (spec A.4)", () => {
+  it("radarState advances with age while protocolState stays whatever it was set to, unaffected by the tick", async () => {
+    const { adapter, emitLaunch } = fakeAdapter();
+    const manager = new HotCandidateManager({ adapter, logger: { info() {}, warn() {}, error() {}, debug() {} } as never });
+    await manager.start();
+
+    emitLaunch(launchEvent({ launchedAt: new Date(Date.now() - 5 * 60_000) }));
+    const candidate = manager.getCandidate(TOKEN)!;
+    candidate.protocolState = "CURVE_ACTIVE"; // simulate a protocol-side update independent of radar ticking
+
+    expect(candidate.radarState).toBe("DISCOVERED"); // not yet re-evaluated
+    manager.tick(new Date());
+    expect(candidate.radarState).toBe("HOT"); // radarState moved with age
+    expect(candidate.protocolState).toBe("CURVE_ACTIVE"); // untouched by the same tick
+
+    await manager.stop();
+  });
+});
+
 describe("HotCandidateManager — expiry (A.6/A.13 step 7)", () => {
   it("releases the holder balance map and stops evaluating once a candidate passes 30m", async () => {
     const { adapter, emitLaunch, emitTransfer } = fakeAdapter();

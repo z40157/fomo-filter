@@ -32,6 +32,26 @@ describe("scoreOrganicMomentum — partial data never fabricates a value", () =>
   });
 });
 
+describe("scoreDistribution — dilution trajectory (A.9)", () => {
+  it("an improving trajectory scores higher than a stagnant one at the same absolute concentration level", () => {
+    const stagnant = scoreDistribution({
+      uniqueBuyerVelocity: null,
+      holderGrowth: null,
+      top10HolderPct: 87,
+      sameWalletBuyRatio: null,
+      concentrationTrend: "STAGNANT",
+    });
+    const improving = scoreDistribution({
+      uniqueBuyerVelocity: null,
+      holderGrowth: null,
+      top10HolderPct: 87,
+      sameWalletBuyRatio: null,
+      concentrationTrend: "IMPROVING",
+    });
+    expect(improving.score).toBeGreaterThan(stagnant.score);
+  });
+});
+
 describe("scoreKol — organic-only breakout must still be possible (B2 core change from V1)", () => {
   it("with 0 KOL/watchlist buys, KOL score is 0 but a high organic score can still stand alone", () => {
     const kol = scoreKol([]);
@@ -109,6 +129,26 @@ describe("scoreEarlyness — age boundaries (A.6/B2.10)", () => {
 
   it("past 30m scores 0 (EXPIRED — never actually reached in practice since expired candidates aren't scored)", () => {
     expect(scoreEarlyness(31 * 60_000).score).toBe(0);
+  });
+});
+
+describe("Organic scoring never requires DexScreener (spec B1.4/B6)", () => {
+  it("a token with real on-chain trades but zero DexScreener-sourced fields still produces a nonzero organic score", () => {
+    // usdValue/marketCap/liquidityUsd all null here — exactly the "on-chain
+    // trades exist, DexScreener returns null" scenario B6 calls out.
+    const organicMomentum = scoreOrganicMomentum({ volumeVelocity: null, volumeAcceleration: null, uniqueBuyerVelocity: 0.8, netBuyFlowUsd: null });
+    const distribution = scoreDistribution({ uniqueBuyerVelocity: 0.8, holderGrowth: null, top10HolderPct: null, sameWalletBuyRatio: null });
+    const score = aggregateScore({
+      organicMomentum,
+      distribution,
+      liquidity: ZERO_LIQ,
+      creator: ZERO_CREATOR,
+      lifecycle: LIFECYCLE,
+      narrative: NO_NARRATIVE,
+      earlyness: scoreEarlyness(5 * 60_000),
+      kol: scoreKol([]),
+    });
+    expect(score.organicScore).toBeGreaterThan(0);
   });
 });
 
