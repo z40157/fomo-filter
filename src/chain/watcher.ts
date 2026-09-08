@@ -2,6 +2,7 @@ import type { Logger } from "../logger.js";
 import { ExponentialBackoff, type BackoffOptions } from "./backoff.js";
 import { computeBackfillRange } from "./recovery.js";
 import type { ScannerStateRepo } from "../db/scannerState.js";
+import { rpcMetrics } from "./rpcMetrics.js";
 
 /** Above this many missed blocks, per-block backfill doesn't scale — jump
  * straight to the current head instead of grinding through a multi-day gap
@@ -194,6 +195,7 @@ export class ChainWatcher {
   }
 
   private handleNewBlock(blockNumber: bigint): void {
+    rpcMetrics.recordWsEvent();
     this.lastProcessedBlock = blockNumber;
     this.deps.logger.debug({ blockNumber: blockNumber.toString() }, "processed new block");
     this.processAndPersist(blockNumber).catch((err: unknown) => {

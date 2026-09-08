@@ -15,6 +15,7 @@ import { createNarrativeFlagsRepo } from "./db/narrativeFlags.js";
 import { createAlertsRepo } from "./db/alerts.js";
 import { createWatchlistCache } from "./watchlist/watchlistCache.js";
 import { CHAIN_ID, createHttpClient, createWsClient } from "./chain/client.js";
+import { rpcMetrics } from "./chain/rpcMetrics.js";
 import { ChainWatcher } from "./chain/watcher.js";
 import { createDetectorHttpClient, createNewTokenDetector } from "./chain/newTokenDetector.js";
 import { createTradeDetectorHttpClient, createTradeDetector } from "./chain/tradeDetector.js";
@@ -357,6 +358,7 @@ async function main(): Promise<void> {
     getLastSignalAt: () => signalsRepo.lastTriggeredAt(),
     countTrackedOutcomes: () => signalOutcomesRepo.countTracked(),
     countPendingOutcomePoints: () => signalOutcomesRepo.countPendingPoints(),
+    getRpcMetrics: () => rpcMetrics.snapshot(),
   });
 
   try {

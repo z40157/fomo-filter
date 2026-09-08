@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import type { AppContext } from "../server.js";
 import type { DexScreenerStatus } from "../../market/dexscreener.js";
+import type { RpcMetricsSnapshot } from "../../chain/rpcMetrics.js";
 
 interface HealthResponse {
   status: "ok";
@@ -18,9 +19,11 @@ interface HealthResponse {
   pendingOutcomePoints: number;
 }
 
+type HealthResponseWithRpcMetrics = HealthResponse & RpcMetricsSnapshot;
+
 export function healthRoutes(ctx: AppContext) {
   return async function registerHealthRoutes(app: FastifyInstance): Promise<void> {
-    app.get("/health", async (): Promise<HealthResponse> => {
+    app.get("/health", async (): Promise<HealthResponseWithRpcMetrics> => {
       const [database, trackedTokens, signalsToday, lastSignalAt, trackedOutcomes, pendingOutcomePoints] =
         await Promise.all([
           ctx.checkDatabase(),
@@ -46,6 +49,7 @@ export function healthRoutes(ctx: AppContext) {
         lastSignalAt: lastSignalAt === null ? null : lastSignalAt.toISOString(),
         trackedOutcomes,
         pendingOutcomePoints,
+        ...ctx.getRpcMetrics(),
       };
     });
   };

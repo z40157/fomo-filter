@@ -4,6 +4,7 @@ import type { WatcherStatus } from "../chain/watcher.js";
 import type { WalletWatchlistRepo } from "../db/walletWatchlist.js";
 import type { WatchlistCache } from "../watchlist/watchlistCache.js";
 import type { DexScreenerStatus } from "../market/dexscreener.js";
+import type { RpcMetricsSnapshot } from "../chain/rpcMetrics.js";
 import { healthRoutes } from "./routes/health.js";
 import { walletRoutes } from "./routes/wallets.js";
 
@@ -22,6 +23,7 @@ export interface AppContext {
   getLastSignalAt: () => Promise<Date | null>;
   countTrackedOutcomes: () => Promise<number>;
   countPendingOutcomePoints: () => Promise<number>;
+  getRpcMetrics: () => RpcMetricsSnapshot;
 }
 
 export function buildServer(ctx: AppContext) {

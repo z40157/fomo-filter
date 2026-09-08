@@ -3,6 +3,26 @@ import { buildServer } from "../src/api/server.js";
 import { createLogger } from "../src/logger.js";
 import type { WalletWatchlistRepo } from "../src/db/walletWatchlist.js";
 import type { WatchlistCache } from "../src/watchlist/watchlistCache.js";
+import type { RpcMetricsSnapshot } from "../src/chain/rpcMetrics.js";
+
+function fakeRpcMetrics(): RpcMetricsSnapshot {
+  return {
+    rpcRequests1m: 0,
+    rpcRequests24h: 0,
+    ethGetLogs1m: 0,
+    ethGetLogs24h: 0,
+    ethCall1m: 0,
+    ethCall24h: 0,
+    ethGetTransaction1m: 0,
+    ethGetTransaction24h: 0,
+    ethGetReceipt1m: 0,
+    ethGetReceipt24h: 0,
+    ethGetBlock1m: 0,
+    ethGetBlock24h: 0,
+    wsEvents1m: 0,
+    wsEvents24h: 0,
+  };
+}
 
 function fakeWalletsRepo(): WalletWatchlistRepo {
   return {
@@ -41,6 +61,7 @@ describe("GET /health", () => {
       getLastSignalAt: async () => new Date("2026-01-01T00:00:00.000Z"),
       countTrackedOutcomes: async () => 4,
       countPendingOutcomePoints: async () => 9,
+      getRpcMetrics: fakeRpcMetrics,
     });
 
     const response = await app.inject({ method: "GET", url: "/health" });
@@ -60,6 +81,7 @@ describe("GET /health", () => {
       lastSignalAt: "2026-01-01T00:00:00.000Z",
       trackedOutcomes: 4,
       pendingOutcomePoints: 9,
+      ...fakeRpcMetrics(),
     });
 
     await app.close();
@@ -81,6 +103,7 @@ describe("GET /health", () => {
       getLastSignalAt: async () => null,
       countTrackedOutcomes: async () => 0,
       countPendingOutcomePoints: async () => 0,
+      getRpcMetrics: fakeRpcMetrics,
     });
 
     const response = await app.inject({ method: "GET", url: "/health" });
@@ -99,6 +122,7 @@ describe("GET /health", () => {
       lastSignalAt: null,
       trackedOutcomes: 0,
       pendingOutcomePoints: 0,
+      ...fakeRpcMetrics(),
     });
 
     await app.close();
