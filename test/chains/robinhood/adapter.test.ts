@@ -45,6 +45,7 @@ function fakeHttpClient(overrides: Partial<Record<string, (...args: unknown[]) =
     }),
     getTransactionReceipt: async () => ({ logs: [] }),
     getBalance: async () => 1_000_000n,
+    getBlockNumber: async () => 500n,
     getLogs: async () => [],
     readContract: async () => null,
     ...overrides,
@@ -248,6 +249,70 @@ describe("createRobinhoodAdapter — trade feed", () => {
     expect(watches.length).toBeGreaterThan(countAfterFirst);
 
     await adapter.stopHotTradeFeed();
+  });
+});
+
+describe("createRobinhoodAdapter — WS reconnect recovery (B1.8)", () => {
+  it("backfills the gap via a bounded getLogs call before resuming the live subscription", async () => {
+    const watches: FakeWatch[] = [];
+    const getLogs = vi.fn(async () => []);
+    const adapter = createRobinhoodAdapter({
+      httpClient: fakeHttpClient({ getLogs, getBlockNumber: async () => 500n }),
+      createWsClient: () => fakeWsClient(watches),
+      dopplerAirlockAddress: AIRLOCK,
+      ponsV1FactoryAddress: FACTORY,
+      logger,
+      resubscribeIntervalMs: 100_000,
+    });
+
+    // Launch discovery sees a log at block 100 -> lastKnownBlock becomes 100.
+    const onLaunch = vi.fn();
+    await adapter.startLaunchDiscovery(onLaunch);
+    const asset = addr("aa1");
+    watches[0]?.onLogs([
+      {
+        args: { asset, numeraire: NATIVE_QUOTE, initializer: addr("init1"), poolOrHook: addr("hook1") },
+        transactionHash: "0xtx1",
+        blockNumber: 100n,
+      },
+    ]);
+    await vi.waitFor(() => expect(onLaunch).toHaveBeenCalledTimes(1));
+
+    // Starting the trade feed now (chain head is 500 per the mock) should
+    // trigger a gap backfill for blocks 101-500 on the Doppler swap event,
+    // before/alongside the live subscription resuming.
+    await adapter.startHotTradeFeed(() => [asset], vi.fn());
+
+    await vi.waitFor(() => expect(getLogs).toHaveBeenCalled());
+    const call = getLogs.mock.calls.find(([args]) => (args as { fromBlock?: bigint }).fromBlock === 101n);
+    expect(call).toBeDefined();
+    const args = call![0] as { fromBlock: bigint; toBlock: bigint };
+    expect(args.toBlock).toBe(500n);
+
+    await adapter.stopHotTradeFeed();
+  });
+
+  it("forces a resubscribe on the next timer tick when a live watch errors, even if the address set is unchanged", async () => {
+    const watches: FakeWatch[] = [];
+    const adapter = createRobinhoodAdapter({
+      httpClient: fakeHttpClient(),
+      createWsClient: () => fakeWsClient(watches),
+      dopplerAirlockAddress: AIRLOCK,
+      ponsV1FactoryAddress: FACTORY,
+      logger,
+      resubscribeIntervalMs: 10,
+    });
+    const token = addr("701");
+    await adapter.startHolderFeed!(() => [token], vi.fn());
+    const countBefore = watches.length;
+
+    const holderWatch = watches.find((w) => w.event !== DOPPLER_CREATE_EVENT && w.event !== PONS_TOKEN_LAUNCHED_EVENT)!;
+    holderWatch.onError(new Error("connection reset"));
+
+    await new Promise((r) => setTimeout(r, 30));
+    expect(watches.length).toBeGreaterThan(countBefore);
+
+    await adapter.stopHolderFeed!();
   });
 });
 

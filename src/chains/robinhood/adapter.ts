@@ -166,6 +166,43 @@ export function createRobinhoodAdapter(deps: RobinhoodAdapterDeps): ChainAdapter
   let lastTradeAddressKey = "";
   let lastHolderAddressKey = "";
 
+  // B1.8 recovery: track the highest block number any live log has
+  // carried, so a WS reconnect can backfill exactly the gap it missed via
+  // a small-range getLogs call before resuming the subscription — never an
+  // unbounded or per-block backfill.
+  let lastKnownBlock: bigint | null = null;
+  function trackBlock(blockNumber: bigint): void {
+    if (lastKnownBlock === null || blockNumber > lastKnownBlock) lastKnownBlock = blockNumber;
+  }
+  async function recoverGap(params: {
+    label: string;
+    address: `0x${string}` | `0x${string}`[];
+    event: Parameters<WsClient["watchEvent"]>[0]["event"];
+    onLogs: (logs: unknown[]) => void;
+  }): Promise<void> {
+    if (lastKnownBlock === null) return;
+    try {
+      const current = await deps.httpClient.getBlockNumber();
+      if (current <= lastKnownBlock) return;
+      const fromBlock = lastKnownBlock + 1n;
+      deps.logger.info(
+        { label: params.label, fromBlock: fromBlock.toString(), toBlock: current.toString() },
+        "robinhood adapter: WS reconnect — backfilling gap via getLogs",
+      );
+      for (const chunk of chunkBlockRange(fromBlock, current, chunkSize)) {
+        const logs = await deps.httpClient.getLogs({
+          address: params.address,
+          event: params.event,
+          fromBlock: chunk.fromBlock,
+          toBlock: chunk.toBlock,
+        });
+        if (logs.length > 0) params.onLogs(logs);
+      }
+    } catch (err) {
+      deps.logger.warn({ err, label: params.label }, "robinhood adapter: gap backfill failed — continuing with live subscription only");
+    }
+  }
+
   function registerRouting(entry: TokenRouting): void {
     routing.set(entry.address.toLowerCase(), entry);
     if (entry.source === "pons_v1") {
@@ -179,6 +216,7 @@ export function createRobinhoodAdapter(deps: RobinhoodAdapterDeps): ChainAdapter
     blockNumber: bigint;
   }, onLaunch: (event: LaunchEvent) => void): Promise<void> {
     try {
+      trackBlock(log.blockNumber);
       const [tx, block] = await Promise.all([
         deps.httpClient.getTransaction({ hash: log.transactionHash }),
         deps.httpClient.getBlock({ blockNumber: log.blockNumber }),
@@ -214,6 +252,7 @@ export function createRobinhoodAdapter(deps: RobinhoodAdapterDeps): ChainAdapter
     blockNumber: bigint;
   }, onLaunch: (event: LaunchEvent) => void): Promise<void> {
     try {
+      trackBlock(log.blockNumber);
       const block = await deps.httpClient.getBlock({ blockNumber: log.blockNumber });
       registerRouting({
         address: log.args.token,
@@ -251,6 +290,7 @@ export function createRobinhoodAdapter(deps: RobinhoodAdapterDeps): ChainAdapter
     onTrade: (trade: TradeEvent) => void;
   }): Promise<void> {
     try {
+      trackBlock(params.blockNumber);
       const [walletResolution, block] = await Promise.all([
         tradeHttpClient.resolveTradeWallet({ transactionHash: params.transactionHash, logIndex: params.logIndex }),
         deps.httpClient.getBlock({ blockNumber: params.blockNumber }),
@@ -296,36 +336,43 @@ export function createRobinhoodAdapter(deps: RobinhoodAdapterDeps): ChainAdapter
         backoffOptions: deps.backoffOptions,
         connect: () => {
           const ws = deps.createWsClient();
+          const onDopplerCreateLogs = (logs: unknown[]): void => {
+            for (const log of logs as { args: unknown; transactionHash: `0x${string}`; blockNumber: bigint }[]) {
+              void handleDopplerCreateLog(
+                { args: log.args as DopplerCreateArgs, transactionHash: log.transactionHash, blockNumber: log.blockNumber },
+                onLaunch,
+              );
+            }
+          };
+          const onPonsLaunchedLogs = (logs: unknown[]): void => {
+            for (const log of logs as { args: unknown; transactionHash: `0x${string}`; blockNumber: bigint }[]) {
+              void handlePonsLaunchedLog(
+                { args: log.args as PonsTokenLaunchedArgs, transactionHash: log.transactionHash, blockNumber: log.blockNumber },
+                onLaunch,
+              );
+            }
+          };
+          // viem can't statically prove every named param decodes for a
+          // non-`strict` watch, even though it always does for a matched
+          // log — same cast chain/newTokenDetector.ts's getLogs wrapper
+          // uses for the identical reason.
           const unwatchCreate = ws.watchEvent({
             address: deps.dopplerAirlockAddress,
             event: DOPPLER_CREATE_EVENT,
-            // viem can't statically prove every named param decodes for a
-            // non-`strict` watch, even though it always does for a matched
-            // log — same cast chain/newTokenDetector.ts's getLogs wrapper
-            // uses for the identical reason.
-            onLogs: (logs) => {
-              for (const log of logs) {
-                void handleDopplerCreateLog(
-                  { args: log.args as DopplerCreateArgs, transactionHash: log.transactionHash, blockNumber: log.blockNumber },
-                  onLaunch,
-                );
-              }
-            },
+            onLogs: onDopplerCreateLogs,
             onError: (err) => launchWatch?.onError(err),
           });
           const unwatchLaunched = ws.watchEvent({
             address: deps.ponsV1FactoryAddress,
             event: PONS_TOKEN_LAUNCHED_EVENT,
-            onLogs: (logs) => {
-              for (const log of logs) {
-                void handlePonsLaunchedLog(
-                  { args: log.args as PonsTokenLaunchedArgs, transactionHash: log.transactionHash, blockNumber: log.blockNumber },
-                  onLaunch,
-                );
-              }
-            },
+            onLogs: onPonsLaunchedLogs,
             onError: (err) => launchWatch?.onError(err),
           });
+          // B1.8: recover any launches that happened during a disconnect
+          // window before the reconnected subscription starts covering
+          // things live — bounded getLogs from lastKnownBlock, not from genesis.
+          void recoverGap({ label: "doppler-create", address: deps.dopplerAirlockAddress, event: DOPPLER_CREATE_EVENT, onLogs: onDopplerCreateLogs });
+          void recoverGap({ label: "pons-launched", address: deps.ponsV1FactoryAddress, event: PONS_TOKEN_LAUNCHED_EVENT, onLogs: onPonsLaunchedLogs });
           return () => {
             unwatchCreate();
             unwatchLaunched();
@@ -364,33 +411,68 @@ export function createRobinhoodAdapter(deps: RobinhoodAdapterDeps): ChainAdapter
           dopplerPairKeyToToken.set(currencyPairKey(token.address, token.pairToken), token.address);
         }
 
+        function onDopplerSwapLogs(logs: unknown[]): void {
+          for (const log of logs as { args: unknown; blockNumber: bigint; transactionHash: `0x${string}`; logIndex: number | null }[]) {
+            trackBlock(log.blockNumber);
+            const args = log.args as DopplerSwapArgs;
+            const token = dopplerPoolIdToToken.get(args.poolId.toLowerCase());
+            if (!token) continue;
+            const routed = routing.get(token);
+            if (!routed) continue;
+            const classified = classifyDopplerSwap(args, routed.address, routed.pairToken);
+            void emitTrade({
+              token: routed,
+              side: classified.side,
+              tokenAmount: classified.tokenAmount,
+              quoteAmount: classified.quoteAmount,
+              blockNumber: log.blockNumber,
+              transactionHash: log.transactionHash,
+              logIndex: log.logIndex ?? 0,
+              onTrade,
+            });
+          }
+        }
+
+        function onPonsSwapLogs(logs: unknown[]): void {
+          for (const log of logs as { args: unknown; address: `0x${string}`; blockNumber: bigint; transactionHash: `0x${string}`; logIndex: number | null }[]) {
+            trackBlock(log.blockNumber);
+            // log.address here is the POOL contract (we subscribed at
+            // `pools`), not the token — routing is keyed by token
+            // address, so reverse-look-up via poolToToken.
+            const tokenAddress = poolToToken.get(log.address.toLowerCase());
+            const token = tokenAddress ? routing.get(tokenAddress) : undefined;
+            if (!token) continue;
+            const args = log.args as PonsSwapArgs;
+            const classified = classifyPonsSwap(args, token.address, token.pairToken);
+            void emitTrade({
+              token,
+              side: classified.side,
+              tokenAmount: classified.tokenAmount,
+              quoteAmount: classified.quoteAmount,
+              blockNumber: log.blockNumber,
+              transactionHash: log.transactionHash,
+              logIndex: log.logIndex ?? 0,
+              onTrade,
+            });
+          }
+        }
+
         if (initializers.length > 0) {
           const ws = deps.createWsClient();
           tradeWatch.doppler = ws.watchEvent({
             address: initializers,
             event: DOPPLER_SWAP_EVENT,
-            onLogs: (logs) => {
-              for (const log of logs) {
-                const args = log.args as DopplerSwapArgs;
-                const token = dopplerPoolIdToToken.get(args.poolId.toLowerCase());
-                if (!token) continue;
-                const routed = routing.get(token);
-                if (!routed) continue;
-                const classified = classifyDopplerSwap(args, routed.address, routed.pairToken);
-                void emitTrade({
-                  token: routed,
-                  side: classified.side,
-                  tokenAmount: classified.tokenAmount,
-                  quoteAmount: classified.quoteAmount,
-                  blockNumber: log.blockNumber,
-                  transactionHash: log.transactionHash,
-                  logIndex: log.logIndex ?? 0,
-                  onTrade,
-                });
-              }
+            onLogs: onDopplerSwapLogs,
+            // B1.8: force the next timer tick to resubscribe even though
+            // the address set itself hasn't changed — refresh()'s diff
+            // check only fires on an actual set change otherwise.
+            onError: (err) => {
+              deps.logger.warn({ err }, "robinhood adapter: Doppler swap watch error — will resubscribe");
+              lastTradeAddressKey = "";
             },
-            onError: (err) => deps.logger.warn({ err }, "robinhood adapter: Doppler swap watch error"),
           });
+          void recoverGap({ label: "doppler-swap", address: initializers, event: DOPPLER_SWAP_EVENT, onLogs: onDopplerSwapLogs });
+
           const wsModify = deps.createWsClient();
           tradeWatch.modifyLiquidity = wsModify.watchEvent({
             address: initializers,
@@ -398,7 +480,10 @@ export function createRobinhoodAdapter(deps: RobinhoodAdapterDeps): ChainAdapter
             onLogs: (logs) => {
               for (const log of logs) resolveDopplerPoolId({ args: log.args as DopplerModifyLiquidityArgs });
             },
-            onError: (err) => deps.logger.warn({ err }, "robinhood adapter: Doppler ModifyLiquidity watch error"),
+            onError: (err) => {
+              deps.logger.warn({ err }, "robinhood adapter: Doppler ModifyLiquidity watch error — will resubscribe");
+              lastTradeAddressKey = "";
+            },
           });
         }
 
@@ -407,30 +492,13 @@ export function createRobinhoodAdapter(deps: RobinhoodAdapterDeps): ChainAdapter
           tradeWatch.pons = ws.watchEvent({
             address: pools,
             event: PONS_V3_SWAP_EVENT,
-            onLogs: (logs) => {
-              for (const log of logs) {
-                // log.address here is the POOL contract (we subscribed at
-                // `pools`), not the token — routing is keyed by token
-                // address, so reverse-look-up via poolToToken.
-                const tokenAddress = poolToToken.get(log.address.toLowerCase());
-                const token = tokenAddress ? routing.get(tokenAddress) : undefined;
-                if (!token) continue;
-                const args = log.args as PonsSwapArgs;
-                const classified = classifyPonsSwap(args, token.address, token.pairToken);
-                void emitTrade({
-                  token,
-                  side: classified.side,
-                  tokenAmount: classified.tokenAmount,
-                  quoteAmount: classified.quoteAmount,
-                  blockNumber: log.blockNumber,
-                  transactionHash: log.transactionHash,
-                  logIndex: log.logIndex ?? 0,
-                  onTrade,
-                });
-              }
+            onLogs: onPonsSwapLogs,
+            onError: (err) => {
+              deps.logger.warn({ err }, "robinhood adapter: Pons swap watch error — will resubscribe");
+              lastTradeAddressKey = "";
             },
-            onError: (err) => deps.logger.warn({ err }, "robinhood adapter: Pons swap watch error"),
           });
+          void recoverGap({ label: "pons-swap", address: pools, event: PONS_V3_SWAP_EVENT, onLogs: onPonsSwapLogs });
         }
       }
 
@@ -468,28 +536,34 @@ export function createRobinhoodAdapter(deps: RobinhoodAdapterDeps): ChainAdapter
         holderWatch?.();
         holderWatch = null;
         if (addresses.length === 0) return;
+        const onTransferLogs = (logs: unknown[]): void => {
+          for (const log of logs as { address: `0x${string}`; args: unknown; blockNumber: bigint; transactionHash: `0x${string}`; logIndex: number | null }[]) {
+            trackBlock(log.blockNumber);
+            const args = log.args as { from: `0x${string}`; to: `0x${string}`; value: bigint };
+            onTransfer({
+              chain: "robinhood",
+              tokenAddress: log.address,
+              from: args.from,
+              to: args.to,
+              amount: args.value,
+              blockNumber: log.blockNumber,
+              txHash: log.transactionHash,
+              logIndex: log.logIndex ?? 0,
+              timestamp: new Date(),
+            });
+          }
+        };
         const ws = deps.createWsClient();
         holderWatch = ws.watchEvent({
           address: addresses,
           event: ERC20_TRANSFER_EVENT,
-          onLogs: (logs) => {
-            for (const log of logs) {
-              const args = log.args as { from: `0x${string}`; to: `0x${string}`; value: bigint };
-              onTransfer({
-                chain: "robinhood",
-                tokenAddress: log.address,
-                from: args.from,
-                to: args.to,
-                amount: args.value,
-                blockNumber: log.blockNumber,
-                txHash: log.transactionHash,
-                logIndex: log.logIndex ?? 0,
-                timestamp: new Date(),
-              });
-            }
+          onLogs: onTransferLogs,
+          onError: (err) => {
+            deps.logger.warn({ err }, "robinhood adapter: holder Transfer watch error — will resubscribe");
+            lastHolderAddressKey = "";
           },
-          onError: (err) => deps.logger.warn({ err }, "robinhood adapter: holder Transfer watch error"),
         });
+        void recoverGap({ label: "holder-transfer", address: addresses, event: ERC20_TRANSFER_EVENT, onLogs: onTransferLogs });
       }
       refresh();
       holderResubscribeTimer = setInterval(refresh, resubscribeIntervalMs);
