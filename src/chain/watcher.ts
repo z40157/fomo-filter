@@ -57,7 +57,17 @@ export class ChainWatcher {
   private readonly deps: WatcherDeps;
   private readonly backoff: ExponentialBackoff;
   private wsConnected = false;
+  /** Latest block number observed over the WS subscription — updated
+   * synchronously so `getStatus()` always reflects the real chain tip, even
+   * while that block's detection work is still in flight. */
   private lastProcessedBlock: bigint | null = null;
+  /** Highest block number whose onBlockRange call has actually completed
+   * and been persisted. The gap between this and `lastProcessedBlock` is
+   * exactly the backlog `drainQueue` coalesces into one range per cycle. */
+  private processedCursor: bigint | null = null;
+  /** Highest block number seen that still needs processing. */
+  private pendingTarget: bigint | null = null;
+  private draining = false;
   private unwatch: (() => void) | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private stopped = false;
@@ -96,6 +106,7 @@ export class ChainWatcher {
 
     if (range === null) {
       this.lastProcessedBlock = priorBlock ?? currentBlock;
+      this.processedCursor = this.lastProcessedBlock;
       if (priorBlock === null) {
         this.deps.logger.info(
           { chainId: this.deps.chainId, block: this.lastProcessedBlock.toString() },
@@ -119,6 +130,7 @@ export class ChainWatcher {
         "restart recovery: missed range too large to backfill — skipping to current head",
       );
       this.lastProcessedBlock = currentBlock;
+      this.processedCursor = currentBlock;
       await this.persist(currentBlock);
       return;
     }
@@ -130,6 +142,7 @@ export class ChainWatcher {
     await this.backfill(range.fromBlock, range.toBlock);
     await this.runOnBlockRange(range.fromBlock, range.toBlock);
     this.lastProcessedBlock = range.toBlock;
+    this.processedCursor = range.toBlock;
     await this.persist(this.lastProcessedBlock);
     this.deps.logger.info(
       { fromBlock: range.fromBlock.toString(), toBlock: range.toBlock.toString() },
@@ -195,15 +208,50 @@ export class ChainWatcher {
 
   private handleNewBlock(blockNumber: bigint): void {
     this.lastProcessedBlock = blockNumber;
-    this.deps.logger.debug({ blockNumber: blockNumber.toString() }, "processed new block");
-    this.processAndPersist(blockNumber).catch((err: unknown) => {
-      this.deps.logger.error({ err }, "failed to process/persist new block");
-    });
+    if (this.pendingTarget === null || blockNumber > this.pendingTarget) {
+      this.pendingTarget = blockNumber;
+    }
+    this.deps.logger.debug({ blockNumber: blockNumber.toString() }, "new block observed");
+    this.drainQueue();
   }
 
-  private async processAndPersist(blockNumber: bigint): Promise<void> {
-    await this.runOnBlockRange(blockNumber, blockNumber);
-    await this.persist(blockNumber);
+  /**
+   * Coalesces bursts of new-block notifications into one range-covering
+   * onBlockRange call at a time, instead of firing an independent concurrent
+   * call per block. On a fast-block chain (this one runs ~250ms blocks),
+   * per-block detection (~5 eth_getLogs calls) can take longer than the
+   * block interval — without coalescing, every block spawns its own
+   * in-flight batch of RPC calls, and the pile-up blows through the RPC
+   * plan's requests/sec cap (confirmed live 2026-09-09: a sustained,
+   * non-abating 429 storm, not a brief post-reconnect blip). Any block that
+   * arrives while a range is already in flight is simply folded into the
+   * next cycle's range rather than triggering its own call.
+   */
+  private drainQueue(): void {
+    if (this.draining) return;
+    if (this.processedCursor === null || this.pendingTarget === null) return;
+    if (this.pendingTarget <= this.processedCursor) return;
+
+    this.draining = true;
+    const fromBlock = this.processedCursor + 1n;
+    const toBlock = this.pendingTarget;
+    this.processRange(fromBlock, toBlock)
+      .catch((err: unknown) => {
+        this.deps.logger.error(
+          { err, fromBlock: fromBlock.toString(), toBlock: toBlock.toString() },
+          "failed to persist processed block range",
+        );
+      })
+      .finally(() => {
+        this.processedCursor = toBlock;
+        this.draining = false;
+        this.drainQueue();
+      });
+  }
+
+  private async processRange(fromBlock: bigint, toBlock: bigint): Promise<void> {
+    await this.runOnBlockRange(fromBlock, toBlock);
+    await this.persist(toBlock);
   }
 
   /**

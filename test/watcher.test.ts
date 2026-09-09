@@ -226,6 +226,65 @@ describe("ChainWatcher ws reconnect", () => {
   });
 });
 
+describe("ChainWatcher block-burst coalescing", () => {
+  it("folds blocks that arrive while a range is still in flight into one onBlockRange call", async () => {
+    const repo = fakeRepo(null);
+    const httpClient: MinimalHttpClient = {
+      getBlockNumber: vi.fn(async () => 100n),
+      getBlock: vi.fn(),
+    };
+    let handlers: Parameters<MinimalWsClient["watchBlockNumber"]>[0] | undefined;
+    const wsClient: MinimalWsClient = {
+      watchBlockNumber: (h) => {
+        handlers = h;
+        return () => {};
+      },
+    };
+
+    let resolveFirstCall: () => void = () => {};
+    const firstCallGate = new Promise<void>((resolve) => {
+      resolveFirstCall = resolve;
+    });
+    const onBlockRange = vi.fn(async () => {
+      // Simulate the first call still being in flight when more blocks
+      // arrive, the exact condition that used to spawn a second concurrent
+      // onBlockRange call per block on a fast-block chain.
+      await firstCallGate;
+    });
+
+    const watcher = new ChainWatcher({
+      chainId: 4663,
+      httpClient,
+      createWsClient: () => wsClient,
+      scannerStateRepo: repo,
+      logger: fakeLogger(),
+      onBlockRange,
+    });
+
+    await watcher.start();
+
+    handlers?.onBlockNumber(101n);
+    await Promise.resolve();
+    // 102n and 103n arrive before 101n's range has resolved.
+    handlers?.onBlockNumber(102n);
+    handlers?.onBlockNumber(103n);
+    await Promise.resolve();
+
+    expect(onBlockRange).toHaveBeenCalledTimes(1);
+    expect(onBlockRange).toHaveBeenCalledWith(101n, 101n);
+
+    resolveFirstCall();
+    for (let i = 0; i < 10; i++) {
+      await Promise.resolve();
+    }
+
+    expect(onBlockRange).toHaveBeenCalledTimes(2);
+    expect(onBlockRange).toHaveBeenCalledWith(102n, 103n);
+    expect(repo.saveState).toHaveBeenCalledWith(4663, 103n);
+    expect(watcher.getStatus().lastBlock).toBe(103n);
+  });
+});
+
 describe("ChainWatcher onBlockRange resilience", () => {
   it("still persists lastProcessedBlock for a live block even if onBlockRange throws", async () => {
     const repo = fakeRepo(null);
