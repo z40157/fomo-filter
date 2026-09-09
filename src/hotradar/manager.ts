@@ -28,11 +28,36 @@ import {
   type KolWalletBuy,
   type ScoreBreakdown,
 } from "./scoring.js";
-import { decideAlertTier, type AlertDecision } from "./alertEngine.js";
-import type { HotCandidate } from "./types.js";
+import { decideAlertTier, tierForScore, type AlertDecision, type AlertTier } from "./alertEngine.js";
+import type { GateResult, HotCandidate, RadarState } from "./types.js";
 
 export interface WatchlistLookup {
   (wallet: string): { ownerGroup: string; tier: "A" | "B" | "C" } | undefined;
+}
+
+/** Everything B3 shadow-run persistence (spec §2.2) needs beyond the
+ * score/confidence this callback already carried — kept as one additive
+ * 4th parameter rather than widening the existing (candidate, score,
+ * confidence) shape, so pre-existing callers/tests that only destructure
+ * the first two/three positional args are unaffected. Nothing here changes
+ * what score/gate/confidence *are* — it only surfaces values already
+ * computed inside evaluateCandidate for a caller that wants to persist
+ * them (spec §6 rule freeze: plumbing, not scoring/gate changes). */
+export interface ScoreEvalContext {
+  ageMs: number;
+  risk: ReturnType<typeof computeRisk>;
+  gate: GateResult;
+  /** Actual alert tier for this evaluation, after the full override ladder
+   * (confidence cap, risk downgrade, age rules) — same value onAlert would
+   * receive as decision.tier. */
+  tier: AlertTier;
+  /** §5.3 — tierForScore(breakoutScore) alone, with neither the confidence
+   * cap nor the risk override applied. Persisted/counted only, never sent
+   * as an alert. */
+  tierUncapped: AlertTier;
+  /** Raw feature values (not scores) feeding this evaluation — spec §2.2:
+   * "features 必须存原始值...不是归一化后的分数". */
+  features: Record<string, unknown>;
 }
 
 export interface HotCandidateManagerDeps {
@@ -41,8 +66,25 @@ export interface HotCandidateManagerDeps {
   watchlistLookup?: WatchlistLookup;
   tickIntervalMs?: number;
   hardGateConfig?: Partial<HardGateInputs>;
-  onScoreEvaluated?: (candidate: HotCandidate, score: ScoreBreakdown, confidence: ReturnType<typeof computeConfidence>) => void;
+  onScoreEvaluated?: (
+    candidate: HotCandidate,
+    score: ScoreBreakdown,
+    confidence: ReturnType<typeof computeConfidence>,
+    context: ScoreEvalContext,
+  ) => void;
   onAlert?: (candidate: HotCandidate, decision: AlertDecision, score: ScoreBreakdown) => void;
+  /** Fired once, synchronously, the moment a new candidate is created —
+   * before the first tick ever evaluates it. Lets a persistence layer
+   * insert the hot_candidates row and a DISCOVERED lifecycle event without
+   * waiting for (or inferring it from) the first score evaluation. */
+  onLaunch?: (candidate: HotCandidate) => void;
+  /** Fired whenever radarState actually changes value during a tick (never
+   * once per tick regardless of change — see spec §2.1: "每次转换一行", not
+   * every evaluation). Covers DISCOVERED->EARLY_OBSERVATION->HOT and the
+   * two terminal transitions (->REJECTED, ->EXPIRED_30M), which onScoreEvaluated
+   * alone can't see since evaluateCandidate is skipped once a candidate is
+   * terminal (see tick()'s early `continue`). */
+  onRadarStateChanged?: (candidate: HotCandidate, from: RadarState, to: RadarState, ageMs: number) => void;
   holderBalanceMap?: HolderBalanceMap;
 }
 
@@ -60,6 +102,10 @@ export interface ManagerCounters {
   unknownReview: number;
   passedGate: number;
   alertsByTier: Record<string, number>;
+  /** B3 §5 — count of Transfer events HolderBalanceMap.applyTransfer()
+   * reported as already-seen (dedup by txHash+logIndex), the closest
+   * available proxy for spec's `duplicateEventCount` health field. */
+  duplicateTransfers: number;
 }
 
 export class HotCandidateManager {
@@ -72,6 +118,7 @@ export class HotCandidateManager {
     unknownReview: 0,
     passedGate: 0,
     alertsByTier: {},
+    duplicateTransfers: 0,
   };
 
   constructor(private readonly deps: HotCandidateManagerDeps) {
@@ -90,6 +137,14 @@ export class HotCandidateManager {
 
   getCandidate(tokenAddress: string): HotCandidate | undefined {
     return this.candidates.get(tokenAddress.toLowerCase())?.candidate;
+  }
+
+  /** Read-only passthrough to the holder balance map, for callers building
+   * a raw-feature snapshot to persist (spec §2.2) — never used by scoring
+   * itself, which still gets holderCount as null (B2.5: real holder growth
+   * isn't wired into scoring in this phase). */
+  getHolderCount(tokenAddress: string): number {
+    return this.holderMap.getHolderCount(tokenAddress);
   }
 
   async start(): Promise<void> {
@@ -122,6 +177,7 @@ export class HotCandidateManager {
         lastCheckTier: "CHEAP",
       });
       this.deps.logger.info({ chain: launch.chain, source: launch.source, token: launch.tokenAddress }, "hot radar: new candidate discovered");
+      this.deps.onLaunch?.(candidate);
     });
 
     await this.deps.adapter.startHotTradeFeed(
@@ -133,13 +189,14 @@ export class HotCandidateManager {
       await this.deps.adapter.startHolderFeed(
         () => this.getActiveTokenAddresses(),
         (transfer) => {
-          this.holderMap.applyTransfer(transfer.tokenAddress, {
+          const result = this.holderMap.applyTransfer(transfer.tokenAddress, {
             from: transfer.from,
             to: transfer.to,
             amount: transfer.amount,
             txHash: transfer.txHash,
             logIndex: transfer.logIndex,
           });
+          if (result === "duplicate") this.counters.duplicateTransfers++;
         },
       );
     }
@@ -175,12 +232,16 @@ export class HotCandidateManager {
     for (const [key, state] of this.candidates) {
       const ms = computeAgeMs(now, state.candidate.launchedAt);
       const wasExpired = state.candidate.radarState === "EXPIRED_30M" || state.candidate.radarState === "REJECTED";
+      const previousRadarState = state.candidate.radarState;
 
       state.candidate.radarState = nextRadarState({
         ageMs: ms,
         currentState: state.candidate.radarState,
         gateStatus: state.candidate.gateStatus,
       });
+      if (state.candidate.radarState !== previousRadarState) {
+        this.deps.onRadarStateChanged?.(state.candidate, previousRadarState, state.candidate.radarState, ms);
+      }
 
       if (isExpired(ms) && !wasExpired) {
         this.holderMap.release(key);
@@ -256,9 +317,40 @@ export class HotCandidateManager {
     });
     const risk = computeRisk({ gateStatus: gate.status, creatorDumpSeverity: null, washTradeShaped: false });
 
-    this.deps.onScoreEvaluated?.(state.candidate, score, confidence);
-
     const decision = decideAlertTier({ breakoutScore: score.breakoutScore, risk: risk.level, confidence: confidence.level, ageMs });
+
+    this.deps.onScoreEvaluated?.(state.candidate, score, confidence, {
+      ageMs,
+      risk,
+      gate,
+      tier: decision.tier,
+      tierUncapped: tierForScore(score.breakoutScore),
+      features: {
+        volume1m: w1m.volume,
+        buys1m: w1m.buys,
+        sells1m: w1m.sells,
+        uniqueBuyers1m: w1m.uniqueBuyers,
+        uniqueTraders1m: w1m.uniqueTraders,
+        netBuyFlow1m: w1m.netBuyFlow,
+        volume3m: snapshot.windows["3m"].volume,
+        uniqueBuyers3m: snapshot.windows["3m"].uniqueBuyers,
+        volume5m: snapshot.windows["5m"].volume,
+        uniqueBuyers5m: snapshot.windows["5m"].uniqueBuyers,
+        volumeVelocity: snapshot.volumeVelocity,
+        volumeAcceleration: snapshot.volumeAcceleration,
+        uniqueBuyerVelocity: snapshot.uniqueBuyerVelocity,
+        tradeIntervalSeconds: snapshot.tradeIntervalSeconds,
+        price: snapshot.price,
+        holderCount: this.holderMap.getHolderCount(state.candidate.tokenAddress),
+        kolBuysCount: state.kolBuys.length,
+        sellability: gateInputs.sellability,
+        creatorLaunches24h: gateInputs.creatorLaunches24h,
+        liquidityThinness: gateInputs.liquidityThinness,
+        topTraderConcentration: gateInputs.topTraderConcentration,
+        holderConcentrationTrend: gateInputs.holderConcentrationTrend,
+      },
+    });
+
     const isFirstAlert = state.lastAlertedScore === null;
     if (decision.tier !== "NONE" && (isFirstAlert || score.breakoutScore - state.lastAlertedScore! >= 0.01)) {
       this.counters.alertsByTier[decision.tier] = (this.counters.alertsByTier[decision.tier] ?? 0) + 1;

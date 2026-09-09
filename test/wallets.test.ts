@@ -88,6 +88,22 @@ function buildApp(walletsRepo: WalletWatchlistRepo, watchlistCache: WatchlistCac
     getLastSignalAt: async () => null,
     countTrackedOutcomes: async () => 0,
     countPendingOutcomePoints: async () => 0,
+    getRpcMetrics: () => ({
+      rpcRequests1m: 0,
+      rpcRequests24h: 0,
+      ethGetLogs1m: 0,
+      ethGetLogs24h: 0,
+      ethCall1m: 0,
+      ethCall24h: 0,
+      ethGetTransaction1m: 0,
+      ethGetTransaction24h: 0,
+      ethGetReceipt1m: 0,
+      ethGetReceipt24h: 0,
+      ethGetBlock1m: 0,
+      ethGetBlock24h: 0,
+      wsEvents1m: 0,
+      wsEvents24h: 0,
+    }),
   });
 }
 

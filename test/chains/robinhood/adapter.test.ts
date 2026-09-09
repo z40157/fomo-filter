@@ -82,7 +82,7 @@ describe("createRobinhoodAdapter — launch discovery", () => {
     ]);
 
     await vi.waitFor(() => expect(onLaunch).toHaveBeenCalledTimes(1));
-    const event = onLaunch.mock.calls[0][0];
+    const event = onLaunch.mock.calls[0]![0];
     expect(event.chain).toBe("robinhood");
     expect(event.source).toBe("doppler");
     expect(event.tokenAddress).toBe(asset);
@@ -126,7 +126,7 @@ describe("createRobinhoodAdapter — launch discovery", () => {
     ]);
 
     await vi.waitFor(() => expect(onLaunch).toHaveBeenCalledTimes(1));
-    expect(onLaunch.mock.calls[0][0].creator).toBe(deployer);
+    expect(onLaunch.mock.calls[0]![0].creator).toBe(deployer);
     expect(getTransaction).not.toHaveBeenCalled();
   });
 });
@@ -201,7 +201,7 @@ describe("createRobinhoodAdapter — trade feed", () => {
     ]);
 
     await vi.waitFor(() => expect(onTrade).toHaveBeenCalledTimes(1));
-    const trade = onTrade.mock.calls[0][0];
+    const trade = onTrade.mock.calls[0]![0];
     expect(trade.side).toBe("BUY");
     expect(trade.tokenAddress).toBe(asset);
     expect(trade.tokenAmount).toBe(500n);
@@ -255,7 +255,7 @@ describe("createRobinhoodAdapter — trade feed", () => {
 describe("createRobinhoodAdapter — WS reconnect recovery (B1.8)", () => {
   it("backfills the gap via a bounded getLogs call before resuming the live subscription", async () => {
     const watches: FakeWatch[] = [];
-    const getLogs = vi.fn(async () => []);
+    const getLogs = vi.fn(async (_args: unknown) => [] as never[]);
     const adapter = createRobinhoodAdapter({
       httpClient: fakeHttpClient({ getLogs, getBlockNumber: async () => 500n }),
       createWsClient: () => fakeWsClient(watches),
@@ -286,8 +286,7 @@ describe("createRobinhoodAdapter — WS reconnect recovery (B1.8)", () => {
     await vi.waitFor(() => expect(getLogs).toHaveBeenCalled());
     const call = getLogs.mock.calls.find(([args]) => (args as { fromBlock?: bigint }).fromBlock === 101n);
     expect(call).toBeDefined();
-    const args = call![0] as { fromBlock: bigint; toBlock: bigint };
-    expect(args.toBlock).toBe(500n);
+    expect((call![0] as { toBlock: bigint }).toBlock).toBe(500n);
 
     await adapter.stopHotTradeFeed();
   });
@@ -343,7 +342,7 @@ describe("createRobinhoodAdapter — holder feed", () => {
     ]);
 
     expect(onTransfer).toHaveBeenCalledTimes(1);
-    expect(onTransfer.mock.calls[0][0]).toMatchObject({ tokenAddress: token, amount: 42n, from, to });
+    expect(onTransfer.mock.calls[0]![0]).toMatchObject({ tokenAddress: token, amount: 42n, from, to });
   });
 
   it("backfillHolderTransfers does a one-time chunked getLogs from launchBlock, not a live subscription (A.13 step 2)", async () => {
@@ -364,7 +363,7 @@ describe("createRobinhoodAdapter — holder feed", () => {
 
     expect(getLogs).toHaveBeenCalledWith(expect.objectContaining({ address: token, fromBlock: 10n, toBlock: 60n }));
     expect(onTransfer).toHaveBeenCalledTimes(1);
-    expect(onTransfer.mock.calls[0][0]).toMatchObject({ tokenAddress: token, amount: 7n });
+    expect(onTransfer.mock.calls[0]![0]).toMatchObject({ tokenAddress: token, amount: 7n });
   });
 });
 

@@ -7,6 +7,16 @@ import type { RpcMetricsSnapshot } from "../chain/rpcMetrics.js";
 import type { RpcBudgetSnapshot } from "./rpcBudget.js";
 import type { HolderBalanceMapHealth } from "./holderBalanceMap.js";
 import type { ManagerCounters } from "./manager.js";
+import type { UnknownReasonCounts, TierUncappedDistribution } from "../db/hotRadarRepo.js";
+import type { OutcomeOffsetLabel } from "./outcomeScheduler.js";
+
+/** A count with both an all-time-since-boot figure and a DB-backed
+ * (restart-durable) last-24h figure — spec §5.1: "重启后数字归零，24h报告没法
+ * 解读" — never expose a bare count without saying which window it is. */
+export interface WindowedCount {
+  sinceBoot: number;
+  last24h: number;
+}
 
 export interface V2HealthSnapshot {
   // Carried over from V1 (spec B5: "保留全部V1 fields") — a real V2
@@ -46,6 +56,44 @@ export interface V2HealthSnapshot {
   balanceTableTokens: number;
   balanceTableAddresses: number;
   balanceTableEvictions: number;
+
+  // ------------------------------------------------------------------
+  // B3 §5 — shadow-run-specific fields. Optional so the B5 pure-function
+  // tests (and any future non-shadow caller of buildV2Health) don't need
+  // to supply them; indexV2.ts's real /health route always does.
+  // ------------------------------------------------------------------
+  uptime?: number;
+  serviceMode?: "shadow";
+  instanceId?: string;
+  dbStatus?: "ok" | "error";
+  wssStatus?: "connected" | "disconnected" | "reconnecting";
+  latestBlock?: string | null;
+  wssReconnectCount?: number;
+
+  launchesSeen?: WindowedCount;
+  earlyObservationCount?: WindowedCount;
+  hotCount?: WindowedCount;
+  passCount?: WindowedCount;
+  rejectCount?: WindowedCount;
+  unknownCount?: WindowedCount;
+  alertCount?: WindowedCount;
+
+  rpcRequestsPerMin?: number;
+  rpcRequestsHotPerMin?: number;
+  rpcRequestsOutcomePerMin?: number;
+  estimatedRpcPerDay?: number;
+
+  dbWriteFailures?: number;
+  duplicateEventCount?: number;
+  missedEventCount?: number | null;
+
+  scoreHistoryRowsToday?: number;
+  balanceTableSize?: number;
+  pendingOutcomePoints?: number;
+
+  unknownByReason?: UnknownReasonCounts;
+  tierUncappedDistribution?: TierUncappedDistribution;
+  outcomePointsByOffset?: Record<OutcomeOffsetLabel, { done: number; pending: number }>;
 }
 
 export interface BuildV2HealthInputs {
@@ -75,6 +123,40 @@ export interface BuildV2HealthInputs {
       | "watchlistBuyHits24h"
       | "activeWatchlistWallets24h"
     >
+  >;
+  /** B3 §5 fields — see V2HealthSnapshot's own comment for why these are
+   * grouped separately (all optional, only the real shadow process supplies
+   * them). Passed through to the output as-is, no defaulting/derivation —
+   * this function stays pure/I/O-free either way. */
+  b3?: Pick<
+    V2HealthSnapshot,
+    | "uptime"
+    | "serviceMode"
+    | "instanceId"
+    | "dbStatus"
+    | "wssStatus"
+    | "latestBlock"
+    | "wssReconnectCount"
+    | "launchesSeen"
+    | "earlyObservationCount"
+    | "hotCount"
+    | "passCount"
+    | "rejectCount"
+    | "unknownCount"
+    | "alertCount"
+    | "rpcRequestsPerMin"
+    | "rpcRequestsHotPerMin"
+    | "rpcRequestsOutcomePerMin"
+    | "estimatedRpcPerDay"
+    | "dbWriteFailures"
+    | "duplicateEventCount"
+    | "missedEventCount"
+    | "scoreHistoryRowsToday"
+    | "balanceTableSize"
+    | "pendingOutcomePoints"
+    | "unknownByReason"
+    | "tierUncappedDistribution"
+    | "outcomePointsByOffset"
   >;
 }
 
@@ -113,5 +195,7 @@ export function buildV2Health(inputs: BuildV2HealthInputs): V2HealthSnapshot {
     balanceTableTokens: inputs.holderBalanceMapHealth.balanceTableTokens,
     balanceTableAddresses: inputs.holderBalanceMapHealth.balanceTableAddresses,
     balanceTableEvictions: inputs.holderBalanceMapHealth.balanceTableEvictions,
+
+    ...inputs.b3,
   };
 }

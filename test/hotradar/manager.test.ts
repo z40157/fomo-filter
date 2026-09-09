@@ -142,7 +142,7 @@ describe("HotCandidateManager — tick evaluation", () => {
     manager.tick(new Date());
 
     expect(onScoreEvaluated).toHaveBeenCalledTimes(1);
-    const [candidate, score] = onScoreEvaluated.mock.calls[0];
+    const [candidate, score] = onScoreEvaluated.mock.calls[0]!;
     expect(candidate.tokenAddress).toBe(TOKEN);
     expect(score.breakoutScore).toBeGreaterThan(0);
     await manager.stop();

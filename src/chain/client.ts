@@ -1,15 +1,18 @@
 import { createPublicClient, http, webSocket, type EIP1193RequestFn, type Transport } from "viem";
-import { rpcMetrics } from "./rpcMetrics.js";
+import { rpcMetrics as defaultRpcMetrics, type RpcMetrics } from "./rpcMetrics.js";
 
-/** Wraps a transport so every JSON-RPC method it sends is counted in
- * `rpcMetrics` (Phase 0 observability — see rpcMetrics.ts). Purely a
- * counting side effect on the request path; request/response handling is
- * untouched. */
-function withRpcMetrics(transport: Transport): Transport {
+/** Wraps a transport so every JSON-RPC method it sends is counted against
+ * the given `RpcMetrics` instance (Phase 0 observability — see
+ * rpcMetrics.ts). Purely a counting side effect on the request path;
+ * request/response handling is untouched. Defaults to the module-level
+ * singleton so every existing V1 call site is unaffected; V2's shadow
+ * process (spec B3 §4.2) passes its own "hot" vs "outcome" instance so the
+ * two RPC paths can be reported separately without sharing a counter. */
+function withRpcMetrics(transport: Transport, metrics: RpcMetrics): Transport {
   return (params) => {
     const inner = transport(params);
     const instrumentedRequest: EIP1193RequestFn = (async (args: { method: string }) => {
-      rpcMetrics.record(args.method);
+      metrics.record(args.method);
       return inner.request(args as Parameters<typeof inner.request>[0]);
     }) as EIP1193RequestFn;
     return { ...inner, request: instrumentedRequest };
@@ -29,16 +32,16 @@ function chainDefinition(rpcUrl: string) {
   } as const;
 }
 
-export function createHttpClient(rpcHttpUrl: string) {
+export function createHttpClient(rpcHttpUrl: string, metrics: RpcMetrics = defaultRpcMetrics) {
   return createPublicClient({
     chain: chainDefinition(rpcHttpUrl),
-    transport: withRpcMetrics(http(rpcHttpUrl)),
+    transport: withRpcMetrics(http(rpcHttpUrl), metrics),
   });
 }
 
 export type HttpClient = ReturnType<typeof createHttpClient>;
 
-export function createWsClient(rpcWsUrl: string) {
+export function createWsClient(rpcWsUrl: string, metrics: RpcMetrics = defaultRpcMetrics) {
   return createPublicClient({
     chain: chainDefinition(rpcWsUrl),
     transport: withRpcMetrics(webSocket(rpcWsUrl, {
@@ -51,7 +54,7 @@ export function createWsClient(rpcWsUrl: string) {
       // stayed open and streamed blocks fine). Plain JSON-RPC traffic over
       // the socket is what actually detects a dead connection here.
       keepAlive: false,
-    })),
+    }), metrics),
   });
 }
 

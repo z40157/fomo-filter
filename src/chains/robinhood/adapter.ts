@@ -90,10 +90,15 @@ function createReconnectingWatch(deps: {
   logger: Logger;
   backoffOptions?: Partial<BackoffOptions>;
   connect: () => (() => void) | null;
+  /** B3 §5 observability — fired each time this watch has to reconnect
+   * after an error, so a caller (the adapter's getStatus()) can surface a
+   * WSS reconnect count without every consumer re-deriving it from logs. */
+  onReconnect?: () => void;
 }) {
   const backoff = new ExponentialBackoff(deps.backoffOptions);
   let unwatch: (() => void) | null = null;
   let stopped = false;
+  let connected = false;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
   function scheduleReconnect(): void {
@@ -109,8 +114,10 @@ function createReconnectingWatch(deps: {
     if (stopped) return;
     try {
       unwatch = deps.connect();
+      connected = true;
       backoff.reset();
     } catch (err) {
+      connected = false;
       deps.logger.warn({ err }, "WSS subscription failed to start, will retry");
       scheduleReconnect();
     }
@@ -120,6 +127,8 @@ function createReconnectingWatch(deps: {
     start,
     onError(err: Error): void {
       deps.logger.warn({ err }, "WSS subscription error — reconnecting");
+      connected = false;
+      deps.onReconnect?.();
       if (unwatch) {
         unwatch();
         unwatch = null;
@@ -128,14 +137,28 @@ function createReconnectingWatch(deps: {
     },
     stop(): void {
       stopped = true;
+      connected = false;
       if (reconnectTimer) clearTimeout(reconnectTimer);
       if (unwatch) unwatch();
       unwatch = null;
     },
+    isConnected(): boolean {
+      return connected;
+    },
   };
 }
 
-export function createRobinhoodAdapter(deps: RobinhoodAdapterDeps): ChainAdapter {
+export interface RobinhoodAdapterStatus {
+  connected: boolean;
+  lastKnownBlock: bigint | null;
+  reconnectCount: number;
+}
+
+export interface RobinhoodAdapter extends ChainAdapter {
+  getStatus(): RobinhoodAdapterStatus;
+}
+
+export function createRobinhoodAdapter(deps: RobinhoodAdapterDeps): RobinhoodAdapter {
   const resubscribeIntervalMs = deps.resubscribeIntervalMs ?? 12_000;
   const chunkSize = deps.maxLogsBlockRange ?? 10_000n;
   const tradeHttpClient = createTradeDetectorHttpClient(deps.httpClient);
@@ -174,6 +197,13 @@ export function createRobinhoodAdapter(deps: RobinhoodAdapterDeps): ChainAdapter
   function trackBlock(blockNumber: bigint): void {
     if (lastKnownBlock === null || blockNumber > lastKnownBlock) lastKnownBlock = blockNumber;
   }
+
+  // B3 §5 observability only — tracked off the launch subscription (the one
+  // always-on feed regardless of hot-candidate count); trade/holder feeds
+  // share the same underlying RPC endpoint so a real network-level outage
+  // shows up here too, even though this isn't a literal union of all three
+  // feeds' individual connection states.
+  let reconnectCount = 0;
   async function recoverGap(params: {
     label: string;
     address: `0x${string}` | `0x${string}`[];
@@ -334,6 +364,9 @@ export function createRobinhoodAdapter(deps: RobinhoodAdapterDeps): ChainAdapter
       launchWatch = createReconnectingWatch({
         logger: deps.logger,
         backoffOptions: deps.backoffOptions,
+        onReconnect: () => {
+          reconnectCount++;
+        },
         connect: () => {
           const ws = deps.createWsClient();
           const onDopplerCreateLogs = (logs: unknown[]): void => {
@@ -689,6 +722,18 @@ export function createRobinhoodAdapter(deps: RobinhoodAdapterDeps): ChainAdapter
         { source: "doppler", role: "airlock", address: deps.dopplerAirlockAddress, eventName: "Create" },
         { source: "pons_v1", role: "factory", address: deps.ponsV1FactoryAddress, eventName: "TokenLaunched" },
       ];
+    },
+
+    // B3 §5 observability — not part of the chain-agnostic ChainAdapter
+    // contract (other chains don't have this shape of connection state),
+    // hence the RobinhoodAdapter return type below rather than adding it to
+    // ChainAdapter itself.
+    getStatus(): RobinhoodAdapterStatus {
+      return {
+        connected: launchWatch?.isConnected() ?? false,
+        lastKnownBlock,
+        reconnectCount,
+      };
     },
   };
 }

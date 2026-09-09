@@ -29,6 +29,7 @@ const counters: ManagerCounters = {
   unknownReview: 4,
   passedGate: 5,
   alertsByTier: { WATCH: 2, EARLY_RADAR: 1, STRONG: 0, URGENT: 0 },
+  duplicateTransfers: 0,
 };
 
 describe("buildV2Health", () => {

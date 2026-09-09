@@ -112,8 +112,26 @@ export const candidateScoreHistory = pgTable(
     breakdown: jsonb("breakdown").notNull(),
     ruleVersion: integer("rule_version").notNull(),
     gateStatus: gateStatusEnum("gate_status").notNull(),
+    // Snapshot of hot_candidates.gate_reasons AT this evaluation (spec §2.2)
+    // — the fast-read column on hot_candidates only ever holds the latest
+    // value, so history needs its own copy to answer "what was UNKNOWN at
+    // +5m" after gate_reasons has since changed.
+    gateReasons: jsonb("gate_reasons").notNull().default([]),
     radarState: radarStateEnum("radar_state").notNull(),
     protocolState: protocolStateEnum("protocol_state").notNull(),
+    // B3 §2.2/§5.3 — actual alert tier (after confidence-cap + risk-override)
+    // vs. the uncapped tier from breakoutScore alone. tierUncapped is
+    // persisted/counted only, NEVER sent as an alert (see hotradar/manager.ts).
+    tier: varchar("tier", { length: 16 }).notNull(),
+    tierUncapped: varchar("tier_uncapped", { length: 16 }).notNull(),
+    // Raw feature values (volume1m, uniqueBuyers3m, holderCount, ...) — NOT
+    // normalized scores, so a future re-weighting can be replayed against
+    // real history (spec §2.2: "归一化规则会变，原始值不会").
+    features: jsonb("features").notNull(),
+    // Per-dimension OK/UNKNOWN/ERROR+reason for the 4 unresolved inputs plus
+    // market data completeness (hotradar/dataStatus.ts) — this run's core
+    // diagnostic output (spec §5.2).
+    dataStatus: jsonb("data_status").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [index("candidate_score_history_hot_candidate_id_score_at_idx").on(table.hotCandidateId, table.scoreAt)],
@@ -158,14 +176,62 @@ export const tokenLifecycleEvents = pgTable(
       .notNull()
       .references(() => hotCandidates.id),
     eventAt: timestamp("event_at", { withTimezone: true }).notNull(),
-    // "radarState" | "protocolState" | "gateStatus" | "invalidated"
+    // B3 §2.1 — age at the moment of transition, so a report can flag
+    // "oldest HOT candidate age" style bugs without re-joining hot_candidates.
+    ageMs: bigint("age_ms", { mode: "number" }).notNull(),
+    // "radarState" | "protocolState" | "gateStatus" | "invalidated" | "alert"
     field: varchar("field", { length: 32 }).notNull(),
     fromValue: varchar("from_value", { length: 32 }),
     toValue: varchar("to_value", { length: 32 }).notNull(),
     reason: text("reason"),
+    // B3 §2.1 — structured detail (e.g. alert tier's score/risk/confidence
+    // at fire time). gateReasons duplicated here (not just reason text) for
+    // REJECT/UNKNOWN_REVIEW transitions per spec §2.1.
+    reasonDetail: jsonb("reason_detail"),
+    gateReasons: jsonb("gate_reasons"),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [index("token_lifecycle_events_hot_candidate_id_event_at_idx").on(table.hotCandidateId, table.eventAt)],
+);
+
+// B3 §4 — Outcome Tracking sample schedule, persisted so a restart doesn't
+// lose pending sample points (spec §4.2: "采样调度必须能在restart后恢复").
+// One row per (candidate, offset) — created all 7 at once the moment a
+// candidate first crosses into HOT/PASS/ALERT (spec §4's trigger set).
+export const outcomeOffsetEnum = pgEnum("outcome_offset", ["5m", "15m", "30m", "1h", "2h", "6h", "24h"]);
+export const outcomePointStatusEnum = pgEnum("outcome_point_status", ["PENDING", "DONE", "SKIPPED"]);
+
+export const candidateOutcomePoints = pgTable(
+  "candidate_outcome_points",
+  {
+    id: serial("id").primaryKey(),
+    hotCandidateId: integer("hot_candidate_id")
+      .notNull()
+      .references(() => hotCandidates.id),
+    offsetLabel: outcomeOffsetEnum("offset_label").notNull(),
+    baselineAt: timestamp("baseline_at", { withTimezone: true }).notNull(),
+    baselinePrice: numeric("baseline_price", { precision: 38, scale: 18 }),
+    scheduledAt: timestamp("scheduled_at", { withTimezone: true }).notNull(),
+    status: outcomePointStatusEnum("status").notNull().default("PENDING"),
+    sampledAt: timestamp("sampled_at", { withTimezone: true }),
+    price: numeric("price", { precision: 38, scale: 18 }),
+    returnPct: numeric("return_pct", { precision: 12, scale: 4 }),
+    maxReturnPct: numeric("max_return_pct", { precision: 12, scale: 4 }),
+    maxDrawdownPct: numeric("max_drawdown_pct", { precision: 12, scale: 4 }),
+    liquidityUsd: numeric("liquidity_usd", { precision: 38, scale: 2 }),
+    volumeUsd: numeric("volume_usd", { precision: 38, scale: 2 }),
+    holders: integer("holders"),
+    // "hot_pipeline" (5m/15m/30m, spec §4.1 — no extra RPC/API call) |
+    // "chain_adapter_liquidity_only" (1h/2h/6h/24h cold sample, spec §4.2)
+    dataSource: varchar("data_source", { length: 32 }),
+    dataStatus: varchar("data_status", { length: 16 }).notNull().default("UNKNOWN"),
+    dataStatusReason: text("data_status_reason"),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    unique("candidate_outcome_points_hot_candidate_id_offset_label_unique").on(table.hotCandidateId, table.offsetLabel),
+    index("candidate_outcome_points_status_scheduled_at_idx").on(table.status, table.scheduledAt),
+  ],
 );
 
 // A.17 — the launchpad/protocol contract addresses + event names each
@@ -198,6 +264,11 @@ export const rpcMetricsSnapshots = pgTable(
   {
     id: serial("id").primaryKey(),
     chain: chainKeyEnum("chain").notNull(),
+    // B3 §4.2 — "hot" (launch/trade/holder feeds) vs "outcome" (cold
+    // 1h/2h/6h/24h sampling) counted separately so one never masks the
+    // other's growth. Defaults to "hot" — the only category that existed
+    // before B3.
+    category: varchar("category", { length: 16 }).notNull().default("hot"),
     snapshotAt: timestamp("snapshot_at", { withTimezone: true }).notNull(),
     rpcRequests1m: integer("rpc_requests_1m").notNull(),
     ethGetLogs1m: integer("eth_get_logs_1m").notNull(),

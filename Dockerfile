@@ -15,6 +15,9 @@ COPY package.json package-lock.json* ./
 RUN npm install --omit=dev
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/drizzle ./drizzle
+# V2 shadow (spec B3) migrations — additive, never read by V1's index.js /
+# scripts/migrate.js. See src/scripts/migrateShadow.ts.
+COPY --from=build /app/drizzle-shadow ./drizzle-shadow
 # config/ currently holds only stockTokens.json + its .example — a
 # hand-maintained, git-tracked, non-secret list (empty by default; see
 # scoring.ts's Narrative dimension). Without this, index.ts's read of

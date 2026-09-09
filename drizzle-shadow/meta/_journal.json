@@ -8,6 +8,13 @@
       "when": 1788871544097,
       "tag": "0000_tiresome_namor",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1788959206178,
+      "tag": "0001_rich_kate_bishop",
+      "breakpoints": true
     }
   ]
 }
