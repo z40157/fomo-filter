@@ -90,7 +90,7 @@ async function main(): Promise<void> {
   const rpcMetricsHot = new RpcMetrics();
   const rpcMetricsOutcome = new RpcMetrics();
   const rpcWeights = parseRpcCreditWeights(env.RPC_CREDIT_WEIGHTS_JSON);
-  const rpcBudget24h = env.RPC_BUDGET_24H ?? null;
+  const rpcBudget24h = env.RPC_CREDIT_BUDGET_24H ?? null;
 
   const httpClient = createHttpClient(env.RH_RPC_HTTP, rpcMetricsHot);
   const adapter: RobinhoodAdapter = createRobinhoodAdapter({
@@ -106,7 +106,7 @@ async function main(): Promise<void> {
   // exactly which one failed (never silently guess/enable).
   const telegramCheck = checkTelegramIsolation(process.env);
   const shadowTelegram: TelegramClient | undefined = telegramCheck.eligible
-    ? createTelegramClient(env.TELEGRAM_BOT_TOKEN_SHADOW!, env.TELEGRAM_CHAT_ID_SHADOW!, logger)
+    ? createTelegramClient(env.V2_TELEGRAM_BOT_TOKEN!, env.V2_TELEGRAM_CHAT_ID!, logger)
     : undefined;
   if (!shadowTelegram) {
     logger.warn({ reasons: telegramCheck.reasons }, "V2 shadow: Telegram disabled — isolation conditions not met (spec §3)");

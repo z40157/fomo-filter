@@ -4,8 +4,9 @@ import { z } from "zod";
 // config/env.ts (V1's) so nothing V2 reads can accidentally pick up a V1
 // var by name collision, and so V1's schema/behavior is untouched by
 // anything B3 needs. Spec B3 §3 condition 3/4: Telegram vars use different
-// names entirely (TELEGRAM_BOT_TOKEN_SHADOW / _CHAT_ID_SHADOW) so even if a
-// Railway project accidentally shared variables across services, shadow
+// names entirely (V2_TELEGRAM_BOT_TOKEN / V2_TELEGRAM_CHAT_ID — matching
+// the names .env.example already reserved for this in Phase A) so even if
+// a Railway project accidentally shared variables across services, shadow
 // alerting still can't silently activate under V1's names.
 
 const evmAddress = z.string().regex(/^0x[a-fA-F0-9]{40}$/, "must be a 0x-prefixed 40 hex char address");
@@ -21,12 +22,12 @@ const envV2Schema = z.object({
   // must be set for shadow alerting to activate at all (see indexV2.ts's
   // isolation check, which also requires TELEGRAM_BOT_TOKEN/_CHAT_ID —
   // V1's names — to be entirely absent from this process's env).
-  TELEGRAM_BOT_TOKEN_SHADOW: z.string().optional(),
-  TELEGRAM_CHAT_ID_SHADOW: z.string().optional(),
+  V2_TELEGRAM_BOT_TOKEN: z.string().optional(),
+  V2_TELEGRAM_CHAT_ID: z.string().optional(),
 
   // §4.2 — RPC budget/credit-weight tuning, same shape as V1's rpcBudget.ts
   // consumers, kept independent per-process.
-  RPC_BUDGET_24H: z.coerce.number().positive().optional(),
+  RPC_CREDIT_BUDGET_24H: z.coerce.number().positive().optional(),
   RPC_CREDIT_WEIGHTS_JSON: z.string().optional(),
 
   // §5 — identifies this instance in /health during a deploy-overlap window
@@ -63,13 +64,13 @@ export interface TelegramIsolationCheck {
 }
 
 export function checkTelegramIsolation(source: NodeJS.ProcessEnv = process.env): TelegramIsolationCheck {
-  const hasOwnBotToken = !!source["TELEGRAM_BOT_TOKEN_SHADOW"];
-  const hasOwnChatId = !!source["TELEGRAM_CHAT_ID_SHADOW"];
+  const hasOwnBotToken = !!source["V2_TELEGRAM_BOT_TOKEN"];
+  const hasOwnChatId = !!source["V2_TELEGRAM_CHAT_ID"];
   const v1TokenAbsent = !source["TELEGRAM_BOT_TOKEN"];
   const v1ChatIdAbsent = !source["TELEGRAM_CHAT_ID"];
   const reasons: string[] = [];
-  if (!hasOwnBotToken) reasons.push("condition 1 (independent bot token) not met: TELEGRAM_BOT_TOKEN_SHADOW is unset");
-  if (!hasOwnChatId) reasons.push("condition 2 (independent chat) not met: TELEGRAM_CHAT_ID_SHADOW is unset");
+  if (!hasOwnBotToken) reasons.push("condition 1 (independent bot token) not met: V2_TELEGRAM_BOT_TOKEN is unset");
+  if (!hasOwnChatId) reasons.push("condition 2 (independent chat) not met: V2_TELEGRAM_CHAT_ID is unset");
   if (!v1TokenAbsent) reasons.push("condition 3 violated: TELEGRAM_BOT_TOKEN (V1's) is present in this process's env");
   if (!v1ChatIdAbsent) reasons.push("condition 3 violated: TELEGRAM_CHAT_ID (V1's) is present in this process's env");
   return {
