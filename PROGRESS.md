@@ -1101,13 +1101,33 @@ amount exactly).
   process that should rarely restart), not fine if this is ever run somewhere
   restarts are frequent and gaps regularly exceed the cap.
 - **This RPC plan (QuickNode) rate-limits `eth_getLogs` (429s) under live
-  traffic**, not just during backfill — observed a handful of 429s in the
-  first ~30s after a restart-from-head, tapering off on their own.
-  `ChainWatcher.runOnBlockRange` already swallows `onBlockRange` failures so
-  block tracking isn't blocked, but a block that 429s has its new-token/trade
-  detection silently skipped for that block — a real, if narrow, gap in
-  detection coverage. Not addressed; matches the RPC-plan constraints already
-  noted in decision #4/#5 above.
+  traffic**, not just during backfill — originally observed as just a
+  handful of 429s in the first ~30s after a restart-from-head, tapering off
+  on their own. **Escalated into a sustained, non-abating storm found live
+  2026-09-09**: `railway logs` showed 413/500 lines were 429/"account
+  limited to 50/sec" errors, continuously, for the full 24+ hours since the
+  prior deploy — not a startup blip. Root cause: `ChainWatcher.handleNewBlock`
+  fired an independent, unawaited `processAndPersist` per incoming block
+  (`src/chain/watcher.ts`). On this chain's ~250ms block time, once RPC
+  latency exceeded the block interval, every new block spawned its own
+  concurrent batch of ~5 `eth_getLogs` calls on top of whatever was already
+  in flight, and the pile-up blew through the rate limit (which then caused
+  more retries, compounding it further). Fixed same day: `ChainWatcher` now
+  tracks a `processedCursor` separate from the latest-seen block, and a new
+  `drainQueue()` coalesces any blocks that arrive while a range is still in
+  flight into the next cycle's single `[processedCursor+1, pendingTarget]`
+  call instead of spawning a new one per block — bounds in-flight detection
+  work to one range call at a time regardless of how fast blocks arrive.
+  **Live-verified after redeploy**: 0 429s in the ~90s immediately following
+  restart (previously dozens within the first 30s alone), service healthy,
+  blocks/trades/new-token detection all proceeding normally. 365/365 tests
+  pass (9 in `watcher.test.ts`, incl. a new burst-coalescing test),
+  typecheck + build clean. This also explains part of why the watchlist
+  looked dormant (`signalsToday: 0`): a block that 429s has its
+  new-token/trade detection silently skipped, so a watched wallet's trade
+  landing in a rate-limited block would never be recorded at all — separate
+  from, and in addition to, Phase 10's finding that the original 72-wallet
+  list is simply inactive.
 - **`drizzle-kit generate` prompts interactively** (not a `--yes`-able flag)
   whenever a table's shape changes enough that it can't tell a dropped+added
   column apart from a rename — this happened converting `wallet_watchlist`
